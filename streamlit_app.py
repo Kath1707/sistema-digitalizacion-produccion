@@ -300,7 +300,7 @@ elif st.session_state.step == 5:
             st.rerun()
 
 # ============================================================================
-# PASO 6 - REGISTRO DE PARÁMETROS POR MUESTRA (GRID)
+# PASO 6 - REGISTRO DE PARÁMETROS POR MUESTRA (vertical, mobile-friendly)
 # ============================================================================
 elif st.session_state.step == 6:
     st.header("5️⃣ Registro de parámetros por muestra")
@@ -312,75 +312,106 @@ elif st.session_state.step == 6:
     st.markdown(f"**Producto:** {st.session_state.producto} &nbsp;|&nbsp; "
                 f"**N° de muestras a evaluar:** {n}")
 
-    st.markdown(f"- ¿El **peso** oscila en el rango especificado? ({fila_spec['peso']} g)")
+    # Lista de parámetros a evaluar: (clave interna, etiqueta corta, texto de la pregunta)
+    parametros = [("peso", "Peso", f"¿El peso oscila en el rango especificado? ({fila_spec['peso']} g)")]
     if tiene_diametro:
-        st.markdown(f"- ¿El **diámetro** oscila en el rango especificado? ({fila_spec['diametro']} cm)")
-    st.markdown(f"- ¿La **altura/espesor** oscila en el rango especificado? ({fila_spec['altura']} cm)")
-    st.markdown("- ¿Las **características organolépticas** (apariencia, sabor, olor, color, "
-                "textura) cumplen con lo especificado?")
+        parametros.append(
+            ("diametro", "Diámetro", f"¿El diámetro oscila en el rango especificado? ({fila_spec['diametro']} cm)")
+        )
+    parametros.append(
+        ("altura", "Altura/Espesor", f"¿La altura/espesor oscila en el rango especificado? ({fila_spec['altura']} cm)")
+    )
+    parametros.append(
+        ("organolepticas", "Organolépticas",
+         "¿Las características organolépticas (apariencia, sabor, olor, color, textura) "
+         "cumplen con lo especificado?")
+    )
+
     with st.expander("Ver detalle de características organolépticas esperadas"):
         st.text(fila_spec["organolepticas"])
 
-    # Construcción de la tabla editable
-    columnas = {
-        "N° Muestra": [f"Muestra {i+1}" for i in range(n)],
-        f"Peso ({fila_spec['peso']} g) - Conforme?": ["Conforme"] * n,
-    }
-    if tiene_diametro:
-        columnas[f"Diámetro ({fila_spec['diametro']} cm) - Conforme?"] = ["Conforme"] * n
-    columnas[f"Altura/Espesor ({fila_spec['altura']} cm) - Conforme?"] = ["Conforme"] * n
-    columnas["Organolépticas - Conforme?"] = ["Conforme"] * n
-
-    df_grid = pd.DataFrame(columnas)
-
-    column_config = {
-        col: st.column_config.SelectboxColumn(
-            col, options=["Conforme", "No conforme"], required=True
-        )
-        for col in df_grid.columns
-        if col != "N° Muestra"
-    }
-    column_config["N° Muestra"] = st.column_config.TextColumn("N° Muestra", disabled=True)
-
-    df_editado = st.data_editor(
-        df_grid,
-        column_config=column_config,
-        hide_index=True,
-        use_container_width=True,
-        num_rows="fixed",
-        key="grid_muestras",
+    st.caption(
+        "Completa cada muestra tocando 'Conforme' o 'No conforme'. Están agrupadas por "
+        "parámetro en pestañas para que sea más fácil de llenar desde el celular."
     )
+
+    # Inicializa las respuestas en session_state (una sola vez por parámetro/muestra)
+    if "respuestas" not in st.session_state:
+        st.session_state.respuestas = {}
+
+    tabs = st.tabs([label for _, label, _ in parametros])
+    for (clave, label, pregunta), tab in zip(parametros, tabs):
+        with tab:
+            st.markdown(f"**{pregunta}**")
+            for i in range(n):
+                key = f"resp_{clave}_{i}"
+                if key not in st.session_state.respuestas:
+                    st.session_state.respuestas[key] = "Conforme"
+                valor_actual = st.session_state.respuestas[key]
+                idx_default = 0 if valor_actual == "Conforme" else 1
+                st.session_state.respuestas[key] = st.radio(
+                    f"Muestra {i + 1}",
+                    ["Conforme", "No conforme"],
+                    index=idx_default,
+                    horizontal=True,
+                    key=f"widget_{key}",
+                )
 
     col1, col2 = st.columns(2)
     with col1:
         st.button("⬅ Atrás", on_click=go_back)
     with col2:
         if st.button("Siguiente ➜", type="primary"):
-            st.session_state.df_muestras = df_editado
+            # Arma el dataframe final de muestras a partir de las respuestas guardadas
+            data = {"N° Muestra": [f"Muestra {i+1}" for i in range(n)]}
+            for clave, label, _ in parametros:
+                col_name = f"{label} - Conforme?"
+                data[col_name] = [
+                    st.session_state.respuestas[f"resp_{clave}_{i}"] for i in range(n)
+                ]
+            st.session_state.df_muestras = pd.DataFrame(data)
             go_next()
             st.rerun()
 
 # ============================================================================
-# PASO 7 - ENVASE, CORRECCIONES, RESUMEN Y EXPORTACIÓN
+# PASO 7 - ENVASE Y CORRECCIONES
 # ============================================================================
 elif st.session_state.step == 7:
-    st.header("6️⃣ Envase, correcciones y resumen final")
+    st.header("6️⃣ Envase y correcciones")
 
     fila_spec = st.session_state.fila_spec
 
     envase_conforme = st.radio(
         f"¿El envase del batch cumple con: **{fila_spec['envase']}**?",
         ["Conforme", "No conforme"],
+        index=0 if st.session_state.get("envase_conforme", "Conforme") == "Conforme" else 1,
         horizontal=True,
     )
 
     correcciones = st.text_area(
         "Correcciones / observaciones (campo libre)",
+        value=st.session_state.get("correcciones", ""),
         placeholder="Escribe aquí cualquier corrección, acción tomada u observación adicional...",
     )
 
-    st.divider()
-    st.subheader("Resumen del registro")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Generar resumen ➜", type="primary"):
+            st.session_state.envase_conforme = envase_conforme
+            st.session_state.correcciones = correcciones
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 8 - RESUMEN FINAL Y EXPORTACIÓN
+# ============================================================================
+elif st.session_state.step == 8:
+    st.header("7️⃣ Resumen final y exportación")
+
+    envase_conforme = st.session_state.envase_conforme
+    correcciones = st.session_state.correcciones
 
     df_muestras = st.session_state.df_muestras
     resumen_cols = [c for c in df_muestras.columns if c != "N° Muestra"]
@@ -392,7 +423,11 @@ elif st.session_state.step == 7:
         for c in resumen_cols
     }
     df_conteo = pd.DataFrame(conteo).T
+    st.subheader("Resultados por parámetro")
     st.dataframe(df_conteo, use_container_width=True)
+
+    with st.expander("Ver detalle muestra por muestra"):
+        st.dataframe(df_muestras, use_container_width=True, hide_index=True)
 
     resumen_info = pd.DataFrame(
         {
@@ -418,6 +453,7 @@ elif st.session_state.step == 7:
             ],
         }
     )
+    st.subheader("Datos del registro")
     st.dataframe(resumen_info, use_container_width=True, hide_index=True)
 
     # ------------------------------------------------------------------
