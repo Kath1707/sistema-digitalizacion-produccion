@@ -1,0 +1,1 @@
+streamlit>=1.32, pandas>=2.0 y openpyxl>=3.1
