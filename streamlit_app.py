@@ -207,6 +207,7 @@ def calcular_juliano(fecha: date) -> str:
 # ----------------------------------------------------------------------------
 def get_gsheet_client():
     if not GSHEETS_DISPONIBLE:
+        st.error("DEBUG: gspread o google-auth no están instalados.")
         return None
     try:
         scopes = [
@@ -217,7 +218,8 @@ def get_gsheet_client():
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client = gspread.authorize(creds)
         return client
-    except Exception:
+    except Exception as e:
+        st.error(f"DEBUG: Error real al conectar → {type(e).__name__}: {e}")
         return None
 
 
@@ -237,7 +239,6 @@ def get_or_create_daily_worksheet(client, fecha_produccion: date):
 
 
 def guardar_en_google_sheets(filas: list) -> tuple:
-    """Intenta guardar en Google Sheets. Devuelve (exito: bool, mensaje: str)."""
     client = get_gsheet_client()
     if client is None:
         return False, "No se pudo conectar a Google Sheets (revisa los Secrets configurados)."
@@ -247,6 +248,9 @@ def guardar_en_google_sheets(filas: list) -> tuple:
         ws.append_rows(filas)
         return True, f"Guardado en la hoja '{fecha_prod.strftime('%Y-%m-%d')}' del Google Sheets."
     except Exception as e:
+        import traceback
+        st.error(f"DEBUG: {type(e).__name__}: {e}")
+        st.code(traceback.format_exc())
         return False, f"Error al guardar en Google Sheets: {e}"
 
 
