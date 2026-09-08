@@ -1,12 +1,28 @@
 """
-App de Registro de Parámetros de Calidad - Producto Terminado B2B Starbucks
-=============================================================================
-Streamlit + GitHub deploy ready.
+App de Registro de Parámetros de Calidad - Producto Terminado B2B Starbucks (v2)
+==================================================================================
+Streamlit + Google Sheets (histórico) + GitHub deploy.
 
 Estructura esperada del repo:
-  app.py
+  streamlit_app.py
   requirements.txt
-  data/MA_BASE_DATOS_PRODUCTOS_TERMINADO.xlsx   <-- este Excel debe viajar en el repo
+  data/MA_BASE_DATOS_PRODUCTOS_TERMINADO.xlsx
+
+Secrets necesarios en Streamlit Cloud (Manage app -> Settings -> Secrets):
+
+[gcp_service_account]
+type = "service_account"
+project_id = "..."
+private_key_id = "..."
+private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+client_email = "...@...iam.gserviceaccount.com"
+client_id = "..."
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+client_x509_cert_url = "..."
+
+SHEET_ID = "1MPaQunUWFy0vnbEg3z-tkhcNINhBHk20Vq2cNj9nyxE"
 """
 
 import io
@@ -15,6 +31,13 @@ from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSHEETS_DISPONIBLE = True
+except ImportError:
+    GSHEETS_DISPONIBLE = False
 
 # ----------------------------------------------------------------------------
 # CONFIGURACIÓN GENERAL
@@ -27,39 +50,70 @@ st.set_page_config(
 
 EXCEL_PATH = "data/MA_BASE_DATOS_PRODUCTOS_TERMINADO.xlsx"
 SHEET_NAME = "ALMENARA-PT_2026"
+CLIENTE_FIJO = "STARBUCKS"
+AREA_FIJA = "EMPAQUE"
+
+EQUIPO_CALIDAD = [
+    "Verónica Iriarte",
+    "Cristina Merino",
+    "Lisseth Aspíllaga",
+    "Sandra Chavez",
+    "Alejandro Herrera",
+    "Katherin Hidalgo",
+]
+
+TEMP_LIBERACION_OPCIONES = ["0 a 4 °C", "<23 °C", "menor a -16°C"]
+
+# Encabezados finales del historial / exportable (mismo orden que la plantilla FR_Liberacion editada)
+HEADERS_EXPORT = [
+    "FECHA", "AREA", "CLIENTE", "N° de Muestra", "Producto", "Línea HACCP",
+    "Lote (Juliano)", "Fecha Producción", "Fecha Vencimiento",
+    "Grados Brix (Cuando aplique)", "T° Liberación",
+    "Peso (g)", "Diámetro (cm)", "Largo (cm)", "Ancho (cm)", "Altura (cm)",
+    "Sabor/Olor/Color", "Textura", "Apariencia",
+    "Integridad del Empaque (C/NC)", "Rotulado (C/NC)",
+    "Conclusión (C/NC)", "Iniciales",
+]
+
+
+def iniciales(nombre_completo: str) -> str:
+    partes = nombre_completo.strip().split()
+    if len(partes) < 2:
+        return nombre_completo[:2].upper()
+    return (partes[0][0] + partes[-1][0]).upper()
+
 
 # ----------------------------------------------------------------------------
-# TABLA MIL-STD-105E / ANSI-ASQ Z1.4 - Nivel de Inspección General II
-# Muestreo simple normal, AQL 2.5%
-# (rango de tamaño de lote, letra código, tamaño de muestra n)
+# TABLA MIL-STD-105E - Nivel de Inspección Especial S-2, Inspección Rigurosa
+# (Tightened, Tabla II-B), AQL 4.0%
+# (lote_min, lote_max, letra código, n, Ac, Re)
 # ----------------------------------------------------------------------------
-SAMPLING_TABLE = [
-    (2, 8, "A", 2),
-    (9, 15, "B", 3),
-    (16, 25, "C", 5),
-    (26, 50, "D", 8),
-    (51, 90, "E", 13),
-    (91, 150, "F", 20),
-    (151, 280, "G", 32),
-    (281, 500, "H", 50),
-    (501, 1200, "J", 80),
-    (1201, 3200, "K", 125),
-    (3201, 10000, "L", 200),
-    (10001, 35000, "M", 315),
-    (35001, 150000, "N", 500),
-    (150001, 500000, "P", 800),
-    (500001, 10_000_000, "Q", 1250),
+SAMPLING_TABLE_S2 = [
+    (2, 8, "A", 2, 0, 1),
+    (9, 15, "A", 2, 0, 1),
+    (16, 25, "B", 3, 0, 1),
+    (26, 50, "B", 3, 0, 1),
+    (51, 90, "B", 3, 0, 1),
+    (91, 150, "C", 5, 0, 1),
+    (151, 280, "C", 5, 0, 1),
+    (281, 500, "C", 5, 0, 1),
+    (501, 1200, "D", 8, 1, 2),
+    (1201, 3200, "D", 8, 1, 2),
+    (3201, 10000, "D", 8, 1, 2),
+    (10001, 35000, "E", 13, 1, 2),
+    (35001, 150000, "E", 13, 1, 2),
+    (150001, 10_000_000, "E", 13, 1, 2),
 ]
 
 
 def get_sample_size(lot_size: int):
-    """Devuelve (letra_codigo, n) según MIL-STD-105E Nivel II, AQL 2.5%."""
-    for low, high, letter, n in SAMPLING_TABLE:
+    """Devuelve (letra_codigo, n, Ac, Re) según MIL-STD-105E Nivel S-2, Tightened, AQL 4.0%."""
+    for low, high, letter, n, ac, re_ in SAMPLING_TABLE_S2:
         if low <= lot_size <= high:
-            return letter, n
+            return letter, n, ac, re_
     if lot_size < 2:
-        return "A", 2
-    return "Q", 1250
+        return "A", 2, 0, 1
+    return "E", 13, 1, 2
 
 
 # ----------------------------------------------------------------------------
@@ -67,54 +121,137 @@ def get_sample_size(lot_size: int):
 # ----------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def load_specs(excel_bytes: bytes) -> pd.DataFrame:
-    """Lee la hoja de producto terminado y arma un dataframe limpio."""
     df_raw = pd.read_excel(
         io.BytesIO(excel_bytes),
         sheet_name=SHEET_NAME,
         header=None,
-        skiprows=7,  # los datos empiezan en la fila 8 (1-indexed)
+        skiprows=7,
     )
 
     cols = [
         "col_extra", "producto", "linea_produccion", "linea_haccp", "tipo",
-        "peso", "diametro", "altura", "organolepticas", "envase",
-        "temp_almacenamiento", "vida_util", "inspeccion",
+        "peso", "diametro", "largo_ancho", "altura", "organolepticas",
+        "temp_almacenamiento", "vida_util",
+        "envase_tipo", "presentacion", "unidades_empaque", "material_empaque",
+        "rotulado",
     ]
     df_raw = df_raw.iloc[:, : len(cols)]
     df_raw.columns = cols
-
     df_raw = df_raw.dropna(subset=["producto"]).copy()
 
-    # Normalización de texto: quitar espacios extra, pasar a formato consistente
     def clean_txt(x):
         if pd.isna(x):
             return x
         return re.sub(r"\s+", " ", str(x)).strip()
 
-    for c in ["producto", "linea_produccion", "linea_haccp", "peso",
-              "diametro", "altura", "organolepticas", "envase",
-              "temp_almacenamiento"]:
+    text_cols = [
+        "producto", "linea_produccion", "linea_haccp", "peso", "diametro",
+        "largo_ancho", "altura", "organolepticas", "temp_almacenamiento",
+        "envase_tipo", "presentacion", "unidades_empaque", "material_empaque",
+        "rotulado",
+    ]
+    for c in text_cols:
         df_raw[c] = df_raw[c].apply(clean_txt)
 
     df_raw["producto"] = df_raw["producto"].str.upper()
     df_raw["linea_haccp"] = df_raw["linea_haccp"].str.upper()
-
     df_raw["vida_util"] = pd.to_numeric(df_raw["vida_util"], errors="coerce")
-
     df_raw = df_raw[df_raw["tipo"].astype(str).str.upper().str.strip() == "PT"]
 
     return df_raw.reset_index(drop=True)
 
 
-def diametro_aplica(valor: str) -> bool:
-    if valor is None:
+def campo_aplica(valor) -> bool:
+    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
         return False
     v = str(valor).strip()
-    return v not in ("", "-", "—", "nan")
+    return v not in ("", "-", "—", "nan", "None")
+
+
+def construir_texto_envase(filas_producto: pd.DataFrame) -> str:
+    """Combina las líneas de envase (primario/secundario) de todas las filas de un producto."""
+    lineas = []
+    vistos = set()
+    contador_generico = 1
+    for _, fila in filas_producto.iterrows():
+        tipo = fila["envase_tipo"]
+        pres = fila["presentacion"]
+        unid = fila["unidades_empaque"]
+        mat = fila["material_empaque"]
+        clave = (tipo, pres, unid, mat)
+        if clave in vistos:
+            continue
+        if not any(campo_aplica(x) for x in [tipo, pres, unid, mat]):
+            continue
+        vistos.add(clave)
+        etiqueta = tipo if campo_aplica(tipo) else f"Envase adicional {contador_generico}:"
+        if not campo_aplica(tipo):
+            contador_generico += 1
+        detalle_partes = []
+        if campo_aplica(pres):
+            detalle_partes.append(f"presentación {pres}")
+        if campo_aplica(unid):
+            detalle_partes.append(f"{unid}")
+        if campo_aplica(mat):
+            detalle_partes.append(f"material {mat}")
+        lineas.append(f"- {etiqueta} " + ", ".join(detalle_partes))
+    return "\n".join(lineas) if lineas else "Sin información de envase registrada."
+
+
+def calcular_juliano(fecha: date) -> str:
+    return str(fecha.timetuple().tm_yday).zfill(3)
 
 
 # ----------------------------------------------------------------------------
-# CARGA DEL ARCHIVO (repo por defecto, o subida manual como respaldo)
+# CONEXIÓN A GOOGLE SHEETS
+# ----------------------------------------------------------------------------
+def get_gsheet_client():
+    if not GSHEETS_DISPONIBLE:
+        return None
+    try:
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(creds)
+        return client
+    except Exception:
+        return None
+
+
+def get_or_create_daily_worksheet(client, fecha_produccion: date):
+    """Abre (o crea) la pestaña del día dentro del Google Sheets base."""
+    sheet_id = st.secrets.get("SHEET_ID")
+    if not sheet_id:
+        raise RuntimeError("No se encontró SHEET_ID en los Secrets.")
+    spreadsheet = client.open_by_key(sheet_id)
+    titulo_hoja = fecha_produccion.strftime("%Y-%m-%d")
+    try:
+        ws = spreadsheet.worksheet(titulo_hoja)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = spreadsheet.add_worksheet(title=titulo_hoja, rows=2000, cols=len(HEADERS_EXPORT))
+        ws.append_row(HEADERS_EXPORT)
+    return ws
+
+
+def guardar_en_google_sheets(filas: list) -> tuple:
+    """Intenta guardar en Google Sheets. Devuelve (exito: bool, mensaje: str)."""
+    client = get_gsheet_client()
+    if client is None:
+        return False, "No se pudo conectar a Google Sheets (revisa los Secrets configurados)."
+    try:
+        fecha_prod = st.session_state.fecha_produccion
+        ws = get_or_create_daily_worksheet(client, fecha_prod)
+        ws.append_rows(filas)
+        return True, f"Guardado en la hoja '{fecha_prod.strftime('%Y-%m-%d')}' del Google Sheets."
+    except Exception as e:
+        return False, f"Error al guardar en Google Sheets: {e}"
+
+
+# ----------------------------------------------------------------------------
+# CARGA DEL ARCHIVO EXCEL DE ESPECIFICACIONES
 # ----------------------------------------------------------------------------
 def get_excel_bytes():
     try:
@@ -123,7 +260,7 @@ def get_excel_bytes():
     except FileNotFoundError:
         st.warning(
             "No encontré el archivo en `data/MA_BASE_DATOS_PRODUCTOS_TERMINADO.xlsx` "
-            "dentro del repositorio. Puedes subirlo manualmente mientras lo agregas al repo."
+            "dentro del repositorio."
         )
         up = st.file_uploader("Sube el Excel de especificaciones (.xlsx)", type=["xlsx"])
         if up is not None:
@@ -132,21 +269,20 @@ def get_excel_bytes():
 
 
 # ----------------------------------------------------------------------------
-# ESTADO DE LA APP (wizard de pasos)
+# ESTADO / WIZARD
 # ----------------------------------------------------------------------------
 if "step" not in st.session_state:
     st.session_state.step = 1
 
+
 def go_next():
     st.session_state.step += 1
+
 
 def go_back():
     st.session_state.step -= 1
 
 
-# ----------------------------------------------------------------------------
-# CARGA DE DATOS
-# ----------------------------------------------------------------------------
 excel_bytes = get_excel_bytes()
 specs_df = load_specs(excel_bytes)
 
@@ -158,46 +294,44 @@ if st.session_state.step == 1:
     st.subheader("Producto Terminado - Línea de Producción B2B Starbucks")
     st.markdown(
         """
-        Esta aplicación permite al **supervisor de calidad** registrar de forma
-        estandarizada la inspección de producto terminado de la línea B2B
-        Starbucks, siguiendo el plan de muestreo **Military Standard 105E
-        (Nivel de Inspección General II, AQL 2.5%)**.
+        Esta aplicación permite al **equipo de calidad** registrar la inspección
+        de producto terminado de la línea B2B Starbucks, siguiendo el plan de
+        muestreo **MIL-STD-105E (Nivel Especial S-2, Inspección Rigurosa, AQL 4.0%)**.
 
-        El flujo de la aplicación es el siguiente:
-        1. Datos del supervisor y fecha de registro.
-        2. Selección de la línea HACCP y el producto a inspeccionar.
-        3. Temperatura de almacenamiento y cálculo automático de la fecha de vencimiento.
-        4. Tamaño del batch y cálculo automático del número de muestras a evaluar.
-        5. Registro de parámetros (peso, diámetro, altura, organolépticas) por muestra.
-        6. Verificación general de envase, correcciones y exportación del registro.
+        El registro queda guardado automáticamente en un historial en Google Sheets.
         """
     )
     st.button("Comenzar registro ➜", on_click=go_next, type="primary")
 
 # ============================================================================
-# PASO 2 - SUPERVISOR Y FECHA
+# PASO 2 - EQUIPO DE CALIDAD Y FECHA DE PRODUCCIÓN
 # ============================================================================
 elif st.session_state.step == 2:
     st.header("1️⃣ Datos del registro")
 
-    supervisor = st.text_input(
-        "Nombre del supervisor de calidad", value=st.session_state.get("supervisor", "")
+    responsable = st.selectbox(
+        "Equipo de calidad (responsable del registro)",
+        EQUIPO_CALIDAD,
+        index=EQUIPO_CALIDAD.index(st.session_state.get("responsable", EQUIPO_CALIDAD[0]))
+        if st.session_state.get("responsable") in EQUIPO_CALIDAD else 0,
     )
-    hoy = date.today()
-    st.info(f"📅 Fecha de registro: **{hoy.strftime('%d/%m/%Y')}** (automática)")
+
+    fecha_produccion = st.date_input(
+        "Fecha de producción (= fecha de registro)",
+        value=st.session_state.get("fecha_produccion", date.today()),
+    )
+
+    st.info(f"**Cliente:** {CLIENTE_FIJO}  |  **Área:** {AREA_FIJA}")
 
     col1, col2 = st.columns(2)
     with col1:
         st.button("⬅ Atrás", on_click=go_back)
     with col2:
-        if st.button("Siguiente ➜", type="primary", disabled=not supervisor.strip()):
-            st.session_state.supervisor = supervisor.strip()
-            st.session_state.fecha_registro = hoy
+        if st.button("Siguiente ➜", type="primary"):
+            st.session_state.responsable = responsable
+            st.session_state.fecha_produccion = fecha_produccion
             go_next()
             st.rerun()
-
-    if not supervisor.strip():
-        st.caption("Ingresa el nombre del supervisor para continuar.")
 
 # ============================================================================
 # PASO 3 - LINEA HACCP Y PRODUCTO
@@ -213,20 +347,25 @@ elif st.session_state.step == 3:
     )
     producto_sel = st.selectbox("Producto", productos_linea)
 
-    # Ficha de referencia (solo informativa)
     filas_prod = specs_df[specs_df["producto"] == producto_sel]
     fila_ref = filas_prod.iloc[0]
+    tiene_diametro = campo_aplica(fila_ref["diametro"])
+    tiene_largo_ancho = campo_aplica(fila_ref["largo_ancho"])
 
     with st.expander("📋 Ficha técnica de referencia (solo informativa)", expanded=True):
         c1, c2, c3 = st.columns(3)
         c1.metric("Peso especificado", fila_ref["peso"])
-        c2.metric(
-            "Diámetro especificado",
-            fila_ref["diametro"] if diametro_aplica(fila_ref["diametro"]) else "No aplica",
-        )
+        if tiene_diametro:
+            c2.metric("Diámetro especificado", fila_ref["diametro"])
+        elif tiene_largo_ancho:
+            c2.metric("Largo x Ancho especificado", fila_ref["largo_ancho"])
+        else:
+            c2.metric("Diámetro / Largo-Ancho", "No aplica")
         c3.metric("Altura/Espesor especificado", fila_ref["altura"])
-        st.markdown(f"**Características organolépticas esperadas:**\n\n{fila_ref['organolepticas']}")
-        st.markdown(f"**Envase:** {fila_ref['envase']}")
+        st.markdown(f"**Organolépticas esperadas:**\n\n{fila_ref['organolepticas']}")
+        st.markdown("**Empaque de referencia:**")
+        st.text(construir_texto_envase(filas_prod))
+        st.markdown(f"**Rotulado:** {fila_ref['rotulado']}")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -239,21 +378,23 @@ elif st.session_state.step == 3:
             st.rerun()
 
 # ============================================================================
-# PASO 4 - TEMPERATURA Y VIDA ÚTIL
+# PASO 4 - TEMPERATURAS (ALMACENAMIENTO Y LIBERACIÓN) Y VIDA ÚTIL
 # ============================================================================
 elif st.session_state.step == 4:
-    st.header("3️⃣ Temperatura de almacenamiento")
+    st.header("3️⃣ Temperaturas")
 
     producto_sel = st.session_state.producto
     filas_prod = specs_df[specs_df["producto"] == producto_sel]
 
     opciones_temp = filas_prod["temp_almacenamiento"].dropna().unique().tolist()
-    temp_sel = st.selectbox("Temperatura de almacenamiento", opciones_temp)
+    temp_almac_sel = st.selectbox("Temperatura de almacenamiento", opciones_temp)
 
-    fila_temp = filas_prod[filas_prod["temp_almacenamiento"] == temp_sel].iloc[0]
+    temp_liberacion_sel = st.selectbox("Temperatura de liberación", TEMP_LIBERACION_OPCIONES)
+
+    fila_temp = filas_prod[filas_prod["temp_almacenamiento"] == temp_almac_sel].iloc[0]
     vida_util_dias = int(fila_temp["vida_util"])
-    fecha_registro = st.session_state.fecha_registro
-    fecha_venc = fecha_registro + timedelta(days=vida_util_dias)
+    fecha_produccion = st.session_state.fecha_produccion
+    fecha_venc = fecha_produccion + timedelta(days=vida_util_dias)
 
     col1, col2 = st.columns(2)
     col1.metric("Vida útil", f"{vida_util_dias} días")
@@ -264,28 +405,59 @@ elif st.session_state.step == 4:
         st.button("⬅ Atrás", on_click=go_back)
     with colB:
         if st.button("Siguiente ➜", type="primary"):
-            st.session_state.temp_almacenamiento = temp_sel
+            st.session_state.temp_almacenamiento = temp_almac_sel
+            st.session_state.temp_liberacion = temp_liberacion_sel
             st.session_state.vida_util = vida_util_dias
             st.session_state.fecha_vencimiento = fecha_venc
             st.session_state.fila_spec = fila_temp.to_dict()
+            st.session_state.filas_producto_completo = filas_prod
             go_next()
             st.rerun()
 
 # ============================================================================
-# PASO 5 - TAMAÑO DE BATCH Y MUESTREO
+# PASO 5 - LOTE (CÓDIGO JULIANO)
 # ============================================================================
 elif st.session_state.step == 5:
-    st.header("4️⃣ Tamaño del batch y muestreo (MIL-STD-105E, Nivel II, AQL 2.5%)")
+    st.header("4️⃣ Lote (código Juliano)")
+
+    modo_juliano = st.radio(
+        "¿Cómo deseas obtener el código Juliano?",
+        ["Calcular automáticamente (según fecha de producción)", "Ingresar manualmente"],
+        horizontal=False,
+    )
+
+    if modo_juliano.startswith("Calcular"):
+        juliano = calcular_juliano(st.session_state.fecha_produccion)
+        st.success(f"Código Juliano calculado: **{juliano}** "
+                   f"(día N° {int(juliano)} del año {st.session_state.fecha_produccion.year})")
+    else:
+        juliano = st.text_input("Ingresa el código Juliano manualmente", value="")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary", disabled=not str(juliano).strip()):
+            st.session_state.lote_juliano = str(juliano).strip()
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 6 - TAMAÑO DE BATCH Y MUESTREO
+# ============================================================================
+elif st.session_state.step == 6:
+    st.header("5️⃣ Tamaño del batch y muestreo (MIL-STD-105E, S-2, Rigurosa, AQL 4.0%)")
 
     batch_size = st.number_input(
         "¿Cuántas unidades tiene el batch?", min_value=1, step=1,
-        value=st.session_state.get("batch_size", 100),
+        value=st.session_state.get("batch_size", 300),
     )
 
-    letra, n_muestras = get_sample_size(int(batch_size))
+    letra, n_muestras, ac, re_ = get_sample_size(int(batch_size))
     st.success(
-        f"Para un batch de **{int(batch_size)}** unidades, corresponde la letra código "
-        f"**{letra}** → tamaño de muestra **n = {n_muestras}**."
+        f"Para un batch de **{int(batch_size)}** unidades: letra código **{letra}** → "
+        f"**n = {n_muestras}** muestras. Criterio: Aceptar con **{ac}** o menos no conformes, "
+        f"Rechazar con **{re_}** o más."
     )
 
     col1, col2 = st.columns(2)
@@ -296,53 +468,60 @@ elif st.session_state.step == 5:
             st.session_state.batch_size = int(batch_size)
             st.session_state.n_muestras = n_muestras
             st.session_state.letra_codigo = letra
+            st.session_state.ac = ac
+            st.session_state.re_ = re_
             go_next()
             st.rerun()
 
 # ============================================================================
-# PASO 6 - REGISTRO DE PARÁMETROS POR MUESTRA (vertical, mobile-friendly)
+# PASO 7 - REGISTRO DE PARÁMETROS POR MUESTRA
 # ============================================================================
-elif st.session_state.step == 6:
-    st.header("5️⃣ Registro de parámetros por muestra")
+elif st.session_state.step == 7:
+    st.header("6️⃣ Registro de parámetros por muestra")
 
     fila_spec = st.session_state.fila_spec
     n = st.session_state.n_muestras
-    tiene_diametro = diametro_aplica(fila_spec["diametro"])
+    tiene_diametro = campo_aplica(fila_spec["diametro"])
+    tiene_largo_ancho = campo_aplica(fila_spec["largo_ancho"])
 
     st.markdown(f"**Producto:** {st.session_state.producto} &nbsp;|&nbsp; "
                 f"**N° de muestras a evaluar:** {n}")
 
-    # Lista de parámetros a evaluar: (clave interna, etiqueta corta, texto de la pregunta)
+    # (clave, etiqueta_pestaña, pregunta)
     parametros = [("peso", "Peso", f"¿El peso oscila en el rango especificado? ({fila_spec['peso']} g)")]
     if tiene_diametro:
         parametros.append(
             ("diametro", "Diámetro", f"¿El diámetro oscila en el rango especificado? ({fila_spec['diametro']} cm)")
         )
+    elif tiene_largo_ancho:
+        parametros.append(
+            ("largo_ancho", "Largo/Ancho",
+             f"¿Las medidas de largo y ancho cumplen con lo especificado? ({fila_spec['largo_ancho']})")
+        )
     parametros.append(
         ("altura", "Altura/Espesor", f"¿La altura/espesor oscila en el rango especificado? ({fila_spec['altura']} cm)")
     )
-    parametros.append(
-        ("organolepticas", "Organolépticas",
-         "¿Las características organolépticas (apariencia, sabor, olor, color, textura) "
-         "cumplen con lo especificado?")
-    )
+    parametros.append(("sabor_olor_color", "Sabor/Olor/Color",
+                        "¿El sabor, olor y color cumplen con lo especificado?"))
+    parametros.append(("textura", "Textura", "¿La textura cumple con lo especificado?"))
+    parametros.append(("apariencia", "Apariencia", "¿La apariencia (incluye decorado, si aplica) cumple con lo especificado?"))
 
     with st.expander("Ver detalle de características organolépticas esperadas"):
         st.text(fila_spec["organolepticas"])
 
-    st.caption(
-        "Completa cada muestra tocando 'Conforme' o 'No conforme'. Están agrupadas por "
-        "parámetro en pestañas para que sea más fácil de llenar desde el celular."
-    )
+    st.caption("Completa cada muestra tocando 'Conforme' o 'No conforme'. Si algún parámetro "
+               "tiene 1 o más 'No conforme', se habilitará un cuadro de comentario al final de esa pestaña.")
 
-    # Inicializa las respuestas en session_state (una sola vez por parámetro/muestra)
     if "respuestas" not in st.session_state:
         st.session_state.respuestas = {}
+    if "comentarios_parametro" not in st.session_state:
+        st.session_state.comentarios_parametro = {}
 
     tabs = st.tabs([label for _, label, _ in parametros])
     for (clave, label, pregunta), tab in zip(parametros, tabs):
         with tab:
             st.markdown(f"**{pregunta}**")
+            hay_no_conforme = False
             for i in range(n):
                 key = f"resp_{clave}_{i}"
                 if key not in st.session_state.respuestas:
@@ -356,42 +535,92 @@ elif st.session_state.step == 6:
                     horizontal=True,
                     key=f"widget_{key}",
                 )
+                if st.session_state.respuestas[key] == "No conforme":
+                    hay_no_conforme = True
+
+            if hay_no_conforme:
+                st.session_state.comentarios_parametro[clave] = st.text_area(
+                    f"Comentario / corrección para '{label}' (hay al menos 1 muestra No conforme)",
+                    value=st.session_state.comentarios_parametro.get(clave, ""),
+                    key=f"comentario_{clave}",
+                )
+            else:
+                st.session_state.comentarios_parametro[clave] = ""
 
     col1, col2 = st.columns(2)
     with col1:
         st.button("⬅ Atrás", on_click=go_back)
     with col2:
         if st.button("Siguiente ➜", type="primary"):
-            # Arma el dataframe final de muestras a partir de las respuestas guardadas
-            data = {"N° Muestra": [f"Muestra {i+1}" for i in range(n)]}
-            for clave, label, _ in parametros:
-                col_name = f"{label} - Conforme?"
-                data[col_name] = [
-                    st.session_state.respuestas[f"resp_{clave}_{i}"] for i in range(n)
-                ]
-            st.session_state.df_muestras = pd.DataFrame(data)
+            st.session_state.parametros_muestra = parametros
             go_next()
             st.rerun()
 
 # ============================================================================
-# PASO 7 - ENVASE Y CORRECCIONES
+# PASO 8 - EMPAQUE Y ROTULADO (a nivel de batch, una sola respuesta)
 # ============================================================================
-elif st.session_state.step == 7:
-    st.header("6️⃣ Envase y correcciones")
+elif st.session_state.step == 8:
+    st.header("7️⃣ Empaque y rotulado")
 
     fila_spec = st.session_state.fila_spec
+    filas_prod = st.session_state.filas_producto_completo
 
-    envase_conforme = st.radio(
-        f"¿El envase del batch cumple con: **{fila_spec['envase']}**?",
+    st.markdown("**Referencia de empaque especificado:**")
+    st.text(construir_texto_envase(filas_prod))
+    empaque_conforme = st.radio(
+        "¿El empaque del batch cumple con lo especificado arriba?",
         ["Conforme", "No conforme"],
-        index=0 if st.session_state.get("envase_conforme", "Conforme") == "Conforme" else 1,
+        index=0 if st.session_state.get("empaque_conforme", "Conforme") == "Conforme" else 1,
         horizontal=True,
+        key="radio_empaque",
     )
+    comentario_empaque = ""
+    if empaque_conforme == "No conforme":
+        comentario_empaque = st.text_area(
+            "Comentario / corrección de empaque",
+            value=st.session_state.get("comentario_empaque", ""),
+        )
 
-    correcciones = st.text_area(
-        "Correcciones / observaciones (campo libre)",
-        value=st.session_state.get("correcciones", ""),
-        placeholder="Escribe aquí cualquier corrección, acción tomada u observación adicional...",
+    st.divider()
+    st.markdown(f"**Referencia de rotulado especificado:** {fila_spec['rotulado']}")
+    rotulado_conforme = st.radio(
+        "¿El rotulado del batch cumple con lo especificado arriba?",
+        ["Conforme", "No conforme"],
+        index=0 if st.session_state.get("rotulado_conforme", "Conforme") == "Conforme" else 1,
+        horizontal=True,
+        key="radio_rotulado",
+    )
+    comentario_rotulado = ""
+    if rotulado_conforme == "No conforme":
+        comentario_rotulado = st.text_area(
+            "Comentario / corrección de rotulado",
+            value=st.session_state.get("comentario_rotulado", ""),
+        )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary"):
+            st.session_state.empaque_conforme = empaque_conforme
+            st.session_state.comentario_empaque = comentario_empaque
+            st.session_state.rotulado_conforme = rotulado_conforme
+            st.session_state.comentario_rotulado = comentario_rotulado
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 9 - CONCLUSIÓN DEL REGISTRO (liberación del batch)
+# ============================================================================
+elif st.session_state.step == 9:
+    st.header("8️⃣ Conclusión del registro")
+
+    st.markdown("Con base en todo lo evaluado, indica si el batch se libera o no.")
+    conclusion = st.radio(
+        "Conclusión (¿se libera el batch?)",
+        ["Conforme", "No conforme"],
+        index=0 if st.session_state.get("conclusion", "Conforme") == "Conforme" else 1,
+        horizontal=True,
     )
 
     col1, col2 = st.columns(2)
@@ -399,80 +628,122 @@ elif st.session_state.step == 7:
         st.button("⬅ Atrás", on_click=go_back)
     with col2:
         if st.button("Generar resumen ➜", type="primary"):
-            st.session_state.envase_conforme = envase_conforme
-            st.session_state.correcciones = correcciones
+            st.session_state.conclusion = conclusion
             go_next()
             st.rerun()
 
 # ============================================================================
-# PASO 8 - RESUMEN FINAL Y EXPORTACIÓN
+# PASO 10 - RESUMEN FINAL, GUARDADO EN GOOGLE SHEETS Y EXPORTACIÓN
 # ============================================================================
-elif st.session_state.step == 8:
-    st.header("7️⃣ Resumen final y exportación")
+elif st.session_state.step == 10:
+    st.header("9️⃣ Resumen final")
 
-    envase_conforme = st.session_state.envase_conforme
-    correcciones = st.session_state.correcciones
+    fila_spec = st.session_state.fila_spec
+    n = st.session_state.n_muestras
+    parametros = st.session_state.parametros_muestra
 
-    df_muestras = st.session_state.df_muestras
-    resumen_cols = [c for c in df_muestras.columns if c != "N° Muestra"]
-    conteo = {
-        c: {
-            "Conforme": int((df_muestras[c] == "Conforme").sum()),
-            "No conforme": int((df_muestras[c] == "No conforme").sum()),
-        }
-        for c in resumen_cols
-    }
-    df_conteo = pd.DataFrame(conteo).T
-    st.subheader("Resultados por parámetro")
-    st.dataframe(df_conteo, use_container_width=True)
-
-    with st.expander("Ver detalle muestra por muestra"):
-        st.dataframe(df_muestras, use_container_width=True, hide_index=True)
-
+    st.subheader("Datos del registro")
     resumen_info = pd.DataFrame(
         {
             "Campo": [
-                "Supervisor de calidad", "Fecha de registro", "Línea HACCP", "Producto",
-                "Temperatura de almacenamiento", "Vida útil (días)", "Fecha de vencimiento",
-                "Tamaño de batch", "Letra código muestreo", "N° de muestras",
-                "Envase (batch)", "Correcciones/observaciones",
+                "Equipo de calidad", "Fecha de producción", "Cliente", "Área",
+                "Línea HACCP", "Producto", "Temperatura de almacenamiento",
+                "Temperatura de liberación", "Vida útil (días)", "Fecha de vencimiento",
+                "Lote (Juliano)", "Tamaño de batch", "Letra código muestreo",
+                "N° de muestras", "Empaque (batch)", "Rotulado (batch)", "Conclusión",
             ],
             "Valor": [
-                st.session_state.supervisor,
-                st.session_state.fecha_registro.strftime("%d/%m/%Y"),
-                st.session_state.linea_haccp,
-                st.session_state.producto,
-                st.session_state.temp_almacenamiento,
+                st.session_state.responsable,
+                st.session_state.fecha_produccion.strftime("%d/%m/%Y"),
+                CLIENTE_FIJO, AREA_FIJA,
+                st.session_state.linea_haccp, st.session_state.producto,
+                st.session_state.temp_almacenamiento, st.session_state.temp_liberacion,
                 st.session_state.vida_util,
                 st.session_state.fecha_vencimiento.strftime("%d/%m/%Y"),
-                st.session_state.batch_size,
-                st.session_state.letra_codigo,
-                st.session_state.n_muestras,
-                envase_conforme,
-                correcciones if correcciones.strip() else "-",
+                st.session_state.lote_juliano, st.session_state.batch_size,
+                st.session_state.letra_codigo, n,
+                st.session_state.empaque_conforme, st.session_state.rotulado_conforme,
+                st.session_state.conclusion,
             ],
         }
     )
-    st.subheader("Datos del registro")
     st.dataframe(resumen_info, use_container_width=True, hide_index=True)
 
-    # ------------------------------------------------------------------
-    # Armado del registro final exportable
-    # ------------------------------------------------------------------
-    export_df = df_muestras.copy()
-    export_df.insert(0, "Supervisor", st.session_state.supervisor)
-    export_df.insert(1, "Fecha de registro", st.session_state.fecha_registro.strftime("%d/%m/%Y"))
-    export_df.insert(2, "Línea HACCP", st.session_state.linea_haccp)
-    export_df.insert(3, "Producto", st.session_state.producto)
-    export_df.insert(4, "Temperatura de almacenamiento", st.session_state.temp_almacenamiento)
-    export_df.insert(5, "Fecha de vencimiento", st.session_state.fecha_vencimiento.strftime("%d/%m/%Y"))
-    export_df.insert(6, "Tamaño de batch", st.session_state.batch_size)
-    export_df.insert(7, "N° de muestras", st.session_state.n_muestras)
-    export_df["Envase (batch) - Conforme?"] = envase_conforme
-    export_df["Correcciones / Observaciones"] = correcciones if correcciones.strip() else "-"
+    st.subheader("Resultados por parámetro (muestras)")
+    conteo = {}
+    for clave, label, _ in parametros:
+        valores = [st.session_state.respuestas[f"resp_{clave}_{i}"] for i in range(n)]
+        conteo[label] = {
+            "Conforme": valores.count("Conforme"),
+            "No conforme": valores.count("No conforme"),
+        }
+    st.dataframe(pd.DataFrame(conteo).T, use_container_width=True)
 
+    # ------------------------------------------------------------------
+    # Armado de las filas exportables (una fila por muestra)
+    # ------------------------------------------------------------------
+    valores_por_parametro = {
+        clave: [st.session_state.respuestas[f"resp_{clave}_{i}"] for i in range(n)]
+        for clave, _, _ in parametros
+    }
+
+    def valor_muestra(clave, i):
+        return valores_por_parametro.get(clave, [""] * n)[i]
+
+    filas_export = []
+    for i in range(n):
+        fila = [
+            st.session_state.fecha_produccion.strftime("%d/%m/%Y"),  # FECHA
+            AREA_FIJA,
+            CLIENTE_FIJO,
+            i + 1,  # N° de Muestra
+            st.session_state.producto,
+            st.session_state.linea_haccp,
+            st.session_state.lote_juliano,
+            st.session_state.fecha_produccion.strftime("%d/%m/%Y"),
+            st.session_state.fecha_vencimiento.strftime("%d/%m/%Y"),
+            "",  # Grados Brix (no aplica)
+            st.session_state.temp_liberacion,
+            valor_muestra("peso", i),
+            valor_muestra("diametro", i) if "diametro" in valores_por_parametro else "",
+            "",  # Largo (va combinado en "largo_ancho", se deja vacío salvo que se separe)
+            "",  # Ancho
+            valor_muestra("altura", i),
+            valor_muestra("sabor_olor_color", i),
+            valor_muestra("textura", i),
+            valor_muestra("apariencia", i),
+            st.session_state.empaque_conforme,
+            st.session_state.rotulado_conforme,
+            st.session_state.conclusion,
+            iniciales(st.session_state.responsable),
+        ]
+        # Si el producto usa largo x ancho en vez de diámetro, lo ponemos en la columna Largo
+        if "largo_ancho" in valores_por_parametro:
+            fila[13] = valor_muestra("largo_ancho", i)
+        filas_export.append(fila)
+
+    export_df = pd.DataFrame(filas_export, columns=HEADERS_EXPORT)
+
+    with st.expander("Ver todas las filas que se guardarán/exportarán"):
+        st.dataframe(export_df, use_container_width=True, hide_index=True)
+
+    # ------------------------------------------------------------------
+    # Guardar en Google Sheets
+    # ------------------------------------------------------------------
+    st.divider()
+    st.subheader("Guardar historial")
+
+    if st.button("💾 Guardar en Google Sheets (historial)", type="primary"):
+        exito, mensaje = guardar_en_google_sheets(filas_export)
+        if exito:
+            st.success(mensaje)
+        else:
+            st.error(mensaje)
+
+    # ------------------------------------------------------------------
+    # Exportación local
+    # ------------------------------------------------------------------
     csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
-
     excel_buffer = io.BytesIO()
     with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
         export_df.to_excel(writer, index=False, sheet_name="Registro")
@@ -486,14 +757,14 @@ elif st.session_state.step == 8:
         st.download_button(
             "⬇ Descargar CSV",
             data=csv_bytes,
-            file_name=f"registro_calidad_{st.session_state.producto}_{st.session_state.fecha_registro}.csv",
+            file_name=f"registro_{st.session_state.producto}_{st.session_state.fecha_produccion}.csv",
             mime="text/csv",
         )
     with col3:
         st.download_button(
             "⬇ Descargar Excel",
             data=excel_buffer,
-            file_name=f"registro_calidad_{st.session_state.producto}_{st.session_state.fecha_registro}.xlsx",
+            file_name=f"registro_{st.session_state.producto}_{st.session_state.fecha_produccion}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
