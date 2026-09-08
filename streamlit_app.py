@@ -207,7 +207,6 @@ def calcular_juliano(fecha: date) -> str:
 # ----------------------------------------------------------------------------
 def get_gsheet_client():
     if not GSHEETS_DISPONIBLE:
-        st.error("DEBUG: gspread o google-auth no están instalados.")
         return None
     try:
         scopes = [
@@ -218,39 +217,72 @@ def get_gsheet_client():
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client = gspread.authorize(creds)
         return client
-    except Exception as e:
-        st.error(f"DEBUG: Error real al conectar → {type(e).__name__}: {e}")
+    except Exception:
         return None
 
 
+TEMPLATE_SHEET_NAME = "Hoja 1"  # pestaña con el logo, encabezado y "CONSIDERACIONES"
+FOOTER_MARCA = "CONSIDERACIONES"
+FILA_ENCABEZADO_PLANTILLA = 4  # fila donde están los títulos de columna (FECHA, AREA, ...)
+
+
+def _encontrar_fila_footer(ws) -> int | None:
+    """Busca la fila donde empieza el bloque 'CONSIDERACIONES:' dentro de la hoja."""
+    valores = ws.get_all_values()
+    for idx, fila in enumerate(valores, start=1):
+        if fila and fila[0].strip().upper().startswith(FOOTER_MARCA):
+            return idx
+    return None
+
+
 def get_or_create_daily_worksheet(client, fecha_produccion: date):
-    """Abre (o crea) la pestaña del día dentro del Google Sheets base."""
+    """Abre (o crea, duplicando la plantilla) la pestaña del día."""
     sheet_id = st.secrets.get("SHEET_ID")
     if not sheet_id:
         raise RuntimeError("No se encontró SHEET_ID en los Secrets.")
     spreadsheet = client.open_by_key(sheet_id)
     titulo_hoja = fecha_produccion.strftime("%Y-%m-%d")
+
     try:
         ws = spreadsheet.worksheet(titulo_hoja)
+        return ws
     except gspread.exceptions.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=titulo_hoja, rows=2000, cols=len(HEADERS_EXPORT))
-        ws.append_row(HEADERS_EXPORT)
+        pass
+
+    # No existe todavía la hoja del día: duplicamos la plantilla oficial
+    plantilla = spreadsheet.worksheet(TEMPLATE_SHEET_NAME)
+    ws = spreadsheet.duplicate_sheet(
+        source_sheet_id=plantilla.id,
+        new_sheet_name=titulo_hoja,
+    )
+
+    # Quitamos las filas vacías de ejemplo (entre el encabezado y "CONSIDERACIONES")
+    fila_footer = _encontrar_fila_footer(ws)
+    primera_fila_datos = FILA_ENCABEZADO_PLANTILLA + 1
+    if fila_footer and fila_footer > primera_fila_datos:
+        ws.delete_rows(primera_fila_datos, fila_footer - 1)
+
     return ws
 
 
 def guardar_en_google_sheets(filas: list) -> tuple:
+    """Intenta guardar en Google Sheets, insertando las filas justo antes de 'CONSIDERACIONES'."""
     client = get_gsheet_client()
     if client is None:
         return False, "No se pudo conectar a Google Sheets (revisa los Secrets configurados)."
     try:
         fecha_prod = st.session_state.fecha_produccion
         ws = get_or_create_daily_worksheet(client, fecha_prod)
-        ws.append_rows(filas)
+
+        fila_footer = _encontrar_fila_footer(ws)
+        if fila_footer is None:
+            # No se encontró el bloque de consideraciones: agregamos al final como respaldo
+            ws.append_rows(filas)
+        else:
+            ws.insert_rows(filas, row=fila_footer)
+
         return True, f"Guardado en la hoja '{fecha_prod.strftime('%Y-%m-%d')}' del Google Sheets."
     except Exception as e:
-        import traceback
-        st.error(f"DEBUG: {type(e).__name__}: {e}")
-        st.code(traceback.format_exc())
         return False, f"Error al guardar en Google Sheets: {e}"
 
 
