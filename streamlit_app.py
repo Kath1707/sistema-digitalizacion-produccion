@@ -354,8 +354,11 @@ elif st.session_state.step == 2:
 
     fecha_produccion = st.date_input(
         "Fecha de producción (= fecha de registro)",
-        value=st.session_state.get("fecha_produccion", date.today()),
+        value=st.session_state.get("fecha_produccion", None),
+        format="DD/MM/YYYY",
     )
+    if fecha_produccion is None:
+        st.caption("⚠️ Selecciona la fecha de producción para continuar (no se precarga sola).")
 
     st.info(f"**Cliente:** {CLIENTE_FIJO}  |  **Área:** {AREA_FIJA}")
 
@@ -363,7 +366,7 @@ elif st.session_state.step == 2:
     with col1:
         st.button("⬅ Atrás", on_click=go_back)
     with col2:
-        if st.button("Siguiente ➜", type="primary"):
+        if st.button("Siguiente ➜", type="primary", disabled=fecha_produccion is None):
             st.session_state.responsable = responsable
             st.session_state.fecha_produccion = fecha_produccion
             go_next()
@@ -541,6 +544,10 @@ elif st.session_state.step == 7:
                         "¿El sabor, olor y color cumplen con lo especificado?"))
     parametros.append(("textura", "Textura", "¿La textura cumple con lo especificado?"))
     parametros.append(("apariencia", "Apariencia", "¿La apariencia (incluye decorado, si aplica) cumple con lo especificado?"))
+    parametros.append(("empaque", "Empaque", "¿El empaque cumple con lo especificado (ver referencia abajo)?"))
+    parametros.append(
+        ("rotulado", "Rotulado", f"¿El rotulado cumple con lo especificado? ({fila_spec['rotulado']})")
+    )
 
     with st.expander("Ver detalle de características organolépticas esperadas"):
         st.text(fila_spec["organolepticas"])
@@ -557,6 +564,9 @@ elif st.session_state.step == 7:
     for (clave, label, pregunta), tab in zip(parametros, tabs):
         with tab:
             st.markdown(f"**{pregunta}**")
+            if clave == "empaque":
+                with st.expander("Ver referencia completa de empaque especificado", expanded=True):
+                    st.text(construir_texto_envase(st.session_state.filas_producto_completo))
             hay_no_conforme = False
             for i in range(n):
                 key = f"resp_{clave}_{i}"
@@ -593,63 +603,10 @@ elif st.session_state.step == 7:
             st.rerun()
 
 # ============================================================================
-# PASO 8 - EMPAQUE Y ROTULADO (a nivel de batch, una sola respuesta)
+# PASO 8 - CONCLUSIÓN DEL REGISTRO (liberación del batch)
 # ============================================================================
 elif st.session_state.step == 8:
-    st.header("7️⃣ Empaque y rotulado")
-
-    fila_spec = st.session_state.fila_spec
-    filas_prod = st.session_state.filas_producto_completo
-
-    st.markdown("**Referencia de empaque especificado:**")
-    st.text(construir_texto_envase(filas_prod))
-    empaque_conforme = st.radio(
-        "¿El empaque del batch cumple con lo especificado arriba?",
-        ["Conforme", "No conforme"],
-        index=0 if st.session_state.get("empaque_conforme", "Conforme") == "Conforme" else 1,
-        horizontal=True,
-        key="radio_empaque",
-    )
-    comentario_empaque = ""
-    if empaque_conforme == "No conforme":
-        comentario_empaque = st.text_area(
-            "Comentario / corrección de empaque",
-            value=st.session_state.get("comentario_empaque", ""),
-        )
-
-    st.divider()
-    st.markdown(f"**Referencia de rotulado especificado:** {fila_spec['rotulado']}")
-    rotulado_conforme = st.radio(
-        "¿El rotulado del batch cumple con lo especificado arriba?",
-        ["Conforme", "No conforme"],
-        index=0 if st.session_state.get("rotulado_conforme", "Conforme") == "Conforme" else 1,
-        horizontal=True,
-        key="radio_rotulado",
-    )
-    comentario_rotulado = ""
-    if rotulado_conforme == "No conforme":
-        comentario_rotulado = st.text_area(
-            "Comentario / corrección de rotulado",
-            value=st.session_state.get("comentario_rotulado", ""),
-        )
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.button("⬅ Atrás", on_click=go_back)
-    with col2:
-        if st.button("Siguiente ➜", type="primary"):
-            st.session_state.empaque_conforme = empaque_conforme
-            st.session_state.comentario_empaque = comentario_empaque
-            st.session_state.rotulado_conforme = rotulado_conforme
-            st.session_state.comentario_rotulado = comentario_rotulado
-            go_next()
-            st.rerun()
-
-# ============================================================================
-# PASO 9 - CONCLUSIÓN DEL REGISTRO (liberación del batch)
-# ============================================================================
-elif st.session_state.step == 9:
-    st.header("8️⃣ Conclusión del registro")
+    st.header("7️⃣ Conclusión del registro")
 
     st.markdown("Con base en todo lo evaluado, indica si el batch se libera o no.")
     conclusion = st.radio(
@@ -669,10 +626,10 @@ elif st.session_state.step == 9:
             st.rerun()
 
 # ============================================================================
-# PASO 10 - RESUMEN FINAL, GUARDADO EN GOOGLE SHEETS Y EXPORTACIÓN
+# PASO 9 - RESUMEN FINAL, GUARDADO EN GOOGLE SHEETS Y EXPORTACIÓN
 # ============================================================================
-elif st.session_state.step == 10:
-    st.header("9️⃣ Resumen final")
+elif st.session_state.step == 9:
+    st.header("8️⃣ Resumen final")
 
     fila_spec = st.session_state.fila_spec
     n = st.session_state.n_muestras
@@ -686,7 +643,7 @@ elif st.session_state.step == 10:
                 "Línea HACCP", "Producto", "Temperatura de almacenamiento",
                 "Temperatura de liberación", "Vida útil (días)", "Fecha de vencimiento",
                 "Lote (Juliano)", "Tamaño de batch", "Letra código muestreo",
-                "N° de muestras", "Empaque (batch)", "Rotulado (batch)", "Conclusión",
+                "N° de muestras", "Conclusión",
             ],
             "Valor": [
                 st.session_state.responsable,
@@ -698,7 +655,6 @@ elif st.session_state.step == 10:
                 st.session_state.fecha_vencimiento.strftime("%d/%m/%Y"),
                 st.session_state.lote_juliano, st.session_state.batch_size,
                 st.session_state.letra_codigo, n,
-                st.session_state.empaque_conforme, st.session_state.rotulado_conforme,
                 st.session_state.conclusion,
             ],
         }
@@ -748,8 +704,8 @@ elif st.session_state.step == 10:
             valor_muestra("sabor_olor_color", i),
             valor_muestra("textura", i),
             valor_muestra("apariencia", i),
-            st.session_state.empaque_conforme,
-            st.session_state.rotulado_conforme,
+            valor_muestra("empaque", i),
+            valor_muestra("rotulado", i),
             st.session_state.conclusion,
             iniciales(st.session_state.responsable),
         ]
