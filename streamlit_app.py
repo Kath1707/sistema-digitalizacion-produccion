@@ -22,7 +22,7 @@ token_uri = "https://oauth2.googleapis.com/token"
 auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
 client_x509_cert_url = "..."
 
-SHEET_ID = "1MPaQunUWFy0vnbEg3z-tkhcNINhBHk20Vq2cNj9nyxE"
+ROOT_FOLDER_ID = "1h46IR2nUS8TZUSIgl1lD-M4nCtp-p_wW"
 """
 
 import io
@@ -35,6 +35,7 @@ import streamlit as st
 try:
     import gspread
     from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build as build_drive_service
     GSHEETS_DISPONIBLE = True
 except ImportError:
     GSHEETS_DISPONIBLE = False
@@ -62,13 +63,28 @@ EQUIPO_CALIDAD = [
     "Katherin Hidalgo",
 ]
 
+TURNOS = ["Día", "Tarde", "Madrugada"]
+
+SUBCARPETA_DRIVE = "Productos Terminados"
+PLANTILLA_NOMBRE = "Liberación PT - Plantilla Base"
+MESES_ES = {
+    1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
+    7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
+}
+
+
+def nombre_mes_es(fecha: date) -> str:
+    return f"{MESES_ES[fecha.month]} {fecha.year}"
+
+
 TEMP_LIBERACION_OPCIONES = ["0 a 4 °C", "<23 °C", "menor a -16°C"]
 
-# Encabezados finales del historial / exportable (mismo orden que la plantilla FR_Liberacion editada)
+# Encabezados finales del historial / exportable (mismo orden que la plantilla FR_Liberacion
+# editada — SIN "Grados Brix", que se eliminó de la plantilla porque ningún producto lo usa)
 HEADERS_EXPORT = [
     "FECHA", "AREA", "CLIENTE", "N° de Muestra", "Producto", "Línea HACCP",
     "Lote (Juliano)", "Fecha Producción", "Fecha Vencimiento",
-    "Grados Brix (Cuando aplique)", "T° Liberación",
+    "T° Liberación",
     "Peso (g)", "Diámetro (cm)", "Largo (cm)", "Ancho (cm)", "Altura (cm)",
     "Sabor/Olor/Color", "Textura", "Apariencia",
     "Integridad del Empaque (C/NC)", "Rotulado (C/NC)",
@@ -203,11 +219,11 @@ def calcular_juliano(fecha: date) -> str:
 
 
 # ----------------------------------------------------------------------------
-# CONEXIÓN A GOOGLE SHEETS
+# CONEXIÓN A GOOGLE DRIVE / SHEETS
 # ----------------------------------------------------------------------------
-def get_gsheet_client():
+def get_gsheet_client_and_drive():
     if not GSHEETS_DISPONIBLE:
-        return None
+        return None, None
     try:
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
@@ -215,10 +231,11 @@ def get_gsheet_client():
         ]
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        client = gspread.authorize(creds)
-        return client
+        gc = gspread.authorize(creds)
+        drive = build_drive_service("drive", "v3", credentials=creds)
+        return gc, drive
     except Exception:
-        return None
+        return None, None
 
 
 TEMPLATE_SHEET_NAME = "Hoja 1"  # pestaña con el logo, encabezado y "CONSIDERACIONES"
@@ -235,17 +252,50 @@ def _encontrar_fila_footer(ws) -> int | None:
     return None
 
 
-def get_or_create_daily_worksheet(client, fecha_produccion: date):
-    """Abre (o crea, duplicando la plantilla) la pestaña del día."""
-    sheet_id = st.secrets.get("SHEET_ID")
-    if not sheet_id:
-        raise RuntimeError("No se encontró SHEET_ID en los Secrets.")
-    spreadsheet = client.open_by_key(sheet_id)
-    titulo_hoja = fecha_produccion.strftime("%Y-%m-%d")
+def _buscar_archivo_en_carpeta(drive, nombre: str, carpeta_id: str, es_carpeta: bool = False):
+    """Busca por nombre exacto dentro de una carpeta. Devuelve el ID o None."""
+    tipo_mime = "application/vnd.google-apps.folder" if es_carpeta else "application/vnd.google-apps.spreadsheet"
+    query = (
+        f"name = '{nombre}' and '{carpeta_id}' in parents "
+        f"and mimeType = '{tipo_mime}' and trashed = false"
+    )
+    resultado = drive.files().list(q=query, fields="files(id, name)").execute()
+    archivos = resultado.get("files", [])
+    return archivos[0]["id"] if archivos else None
+
+
+def get_or_create_month_spreadsheet_id(drive, root_folder_id: str, fecha: date) -> str:
+    """Devuelve el ID del Google Sheets del mes correspondiente.
+
+    IMPORTANTE: las cuentas de servicio no tienen cuota propia de almacenamiento
+    en Drive, así que NO pueden crear archivos nuevos (falla con
+    'storageQuotaExceeded'). Por eso, si el archivo del mes no existe todavía,
+    le pedimos a la persona que lo duplique manualmente una vez (queda con su
+    propia cuota de Drive; la cuenta de servicio ya tiene acceso heredado de la carpeta).
+    """
+    subcarpeta_id = _buscar_archivo_en_carpeta(drive, SUBCARPETA_DRIVE, root_folder_id, es_carpeta=True)
+    if subcarpeta_id is None:
+        raise RuntimeError(f"No encontré la subcarpeta '{SUBCARPETA_DRIVE}' dentro de la carpeta raíz.")
+
+    nombre_mes = nombre_mes_es(fecha)
+    archivo_mes_id = _buscar_archivo_en_carpeta(drive, nombre_mes, subcarpeta_id)
+    if archivo_mes_id:
+        return archivo_mes_id
+
+    raise RuntimeError(
+        f"Todavía no existe el archivo del mes '{nombre_mes}' dentro de "
+        f"'{SUBCARPETA_DRIVE}'. Duplica manualmente '{PLANTILLA_NOMBRE}' en esa "
+        f"carpeta de Drive y renómbralo exactamente '{nombre_mes}' (Google no "
+        f"permite que la cuenta de servicio cree archivos nuevos automáticamente)."
+    )
+
+
+def get_or_create_daily_worksheet(spreadsheet, fecha_produccion: date, turno: str):
+    """Abre (o crea, duplicando la plantilla) la pestaña del día + turno."""
+    titulo_hoja = f"{fecha_produccion.strftime('%Y-%m-%d')} {turno}"
 
     try:
-        ws = spreadsheet.worksheet(titulo_hoja)
-        return ws
+        return spreadsheet.worksheet(titulo_hoja)
     except gspread.exceptions.WorksheetNotFound:
         pass
 
@@ -266,13 +316,21 @@ def get_or_create_daily_worksheet(client, fecha_produccion: date):
 
 
 def guardar_en_google_sheets(filas: list) -> tuple:
-    """Intenta guardar en Google Sheets, insertando las filas justo antes de 'CONSIDERACIONES'."""
-    client = get_gsheet_client()
-    if client is None:
-        return False, "No se pudo conectar a Google Sheets (revisa los Secrets configurados)."
+    """Guarda las filas en la hoja del día+turno correspondiente, dentro del Sheets del mes."""
+    gc, drive = get_gsheet_client_and_drive()
+    if gc is None or drive is None:
+        return False, "No se pudo conectar a Google Drive/Sheets (revisa los Secrets configurados)."
     try:
+        root_folder_id = st.secrets.get("ROOT_FOLDER_ID")
+        if not root_folder_id:
+            return False, "No se encontró ROOT_FOLDER_ID en los Secrets."
+
         fecha_prod = st.session_state.fecha_produccion
-        ws = get_or_create_daily_worksheet(client, fecha_prod)
+        turno = st.session_state.turno
+
+        spreadsheet_id = get_or_create_month_spreadsheet_id(drive, root_folder_id, fecha_prod)
+        spreadsheet = gc.open_by_key(spreadsheet_id)
+        ws = get_or_create_daily_worksheet(spreadsheet, fecha_prod, turno)
 
         fila_footer = _encontrar_fila_footer(ws)
         if fila_footer is None:
@@ -281,7 +339,10 @@ def guardar_en_google_sheets(filas: list) -> tuple:
         else:
             ws.insert_rows(filas, row=fila_footer)
 
-        return True, f"Guardado en la hoja '{fecha_prod.strftime('%Y-%m-%d')}' del Google Sheets."
+        return True, (
+            f"Guardado en '{nombre_mes_es(fecha_prod)}' → hoja "
+            f"'{fecha_prod.strftime('%Y-%m-%d')} {turno}'."
+        )
     except Exception as e:
         return False, f"Error al guardar en Google Sheets: {e}"
 
@@ -352,6 +413,13 @@ elif st.session_state.step == 2:
         if st.session_state.get("responsable") in EQUIPO_CALIDAD else 0,
     )
 
+    turno = st.selectbox(
+        "Turno",
+        TURNOS,
+        index=TURNOS.index(st.session_state.get("turno", TURNOS[0]))
+        if st.session_state.get("turno") in TURNOS else 0,
+    )
+
     fecha_produccion = st.date_input(
         "Fecha de producción (= fecha de registro)",
         value=st.session_state.get("fecha_produccion", None),
@@ -368,6 +436,7 @@ elif st.session_state.step == 2:
     with col2:
         if st.button("Siguiente ➜", type="primary", disabled=fecha_produccion is None):
             st.session_state.responsable = responsable
+            st.session_state.turno = turno
             st.session_state.fecha_produccion = fecha_produccion
             go_next()
             st.rerun()
@@ -639,14 +708,14 @@ elif st.session_state.step == 9:
     resumen_info = pd.DataFrame(
         {
             "Campo": [
-                "Equipo de calidad", "Fecha de producción", "Cliente", "Área",
+                "Equipo de calidad", "Turno", "Fecha de producción", "Cliente", "Área",
                 "Línea HACCP", "Producto", "Temperatura de almacenamiento",
                 "Temperatura de liberación", "Vida útil (días)", "Fecha de vencimiento",
                 "Lote (Juliano)", "Tamaño de batch", "Letra código muestreo",
                 "N° de muestras", "Conclusión",
             ],
             "Valor": [
-                st.session_state.responsable,
+                st.session_state.responsable, st.session_state.turno,
                 st.session_state.fecha_produccion.strftime("%d/%m/%Y"),
                 CLIENTE_FIJO, AREA_FIJA,
                 st.session_state.linea_haccp, st.session_state.producto,
@@ -694,7 +763,6 @@ elif st.session_state.step == 9:
             st.session_state.lote_juliano,
             st.session_state.fecha_produccion.strftime("%d/%m/%Y"),
             st.session_state.fecha_vencimiento.strftime("%d/%m/%Y"),
-            "",  # Grados Brix (no aplica)
             st.session_state.temp_liberacion,
             valor_muestra("peso", i),
             valor_muestra("diametro", i) if "diametro" in valores_por_parametro else "",
