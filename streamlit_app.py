@@ -49,7 +49,7 @@ st.set_page_config(
     layout="wide",
 )
 
-EXCEL_PATH = "MA_BASE_DATOS_PRODUCTOS_TERMINADO.xlsx"
+EXCEL_PATH = "data/MA_BASE_DATOS_PRODUCTOS_TERMINADO.xlsx"
 SHEET_NAME = "ALMENARA-PT_2026"
 CLIENTE_FIJO = "STARBUCKS"
 AREA_FIJA = "EMPAQUE"
@@ -63,10 +63,9 @@ EQUIPO_CALIDAD = [
     "Katherin Hidalgo",
 ]
 
-TURNOS = ["Día", "Tarde", "Madrugada"]
-
 SUBCARPETA_DRIVE = "Productos Terminados"
 PLANTILLA_NOMBRE = "Liberación PT - Plantilla Base"
+SUFIJO_MES = " - PT"
 MESES_ES = {
     1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio",
     7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
@@ -74,7 +73,7 @@ MESES_ES = {
 
 
 def nombre_mes_es(fecha: date) -> str:
-    return f"{MESES_ES[fecha.month]} {fecha.year}"
+    return f"{MESES_ES[fecha.month]} {fecha.year}{SUFIJO_MES}"
 
 
 TEMP_LIBERACION_OPCIONES = ["0 a 4 °C", "<23 °C", "menor a -16°C"]
@@ -290,9 +289,9 @@ def get_or_create_month_spreadsheet_id(drive, root_folder_id: str, fecha: date) 
     )
 
 
-def get_or_create_daily_worksheet(spreadsheet, fecha_produccion: date, turno: str):
-    """Abre (o crea, duplicando la plantilla) la pestaña del día + turno."""
-    titulo_hoja = f"{fecha_produccion.strftime('%Y-%m-%d')} {turno}"
+def get_or_create_daily_worksheet(spreadsheet, fecha_produccion: date):
+    """Abre (o crea, duplicando la plantilla) la pestaña del día."""
+    titulo_hoja = fecha_produccion.strftime("%Y-%m-%d")
 
     try:
         return spreadsheet.worksheet(titulo_hoja)
@@ -316,7 +315,7 @@ def get_or_create_daily_worksheet(spreadsheet, fecha_produccion: date, turno: st
 
 
 def guardar_en_google_sheets(filas: list) -> tuple:
-    """Guarda las filas en la hoja del día+turno correspondiente, dentro del Sheets del mes."""
+    """Guarda las filas en la hoja del día correspondiente, dentro del Sheets del mes."""
     gc, drive = get_gsheet_client_and_drive()
     if gc is None or drive is None:
         return False, "No se pudo conectar a Google Drive/Sheets (revisa los Secrets configurados)."
@@ -326,11 +325,10 @@ def guardar_en_google_sheets(filas: list) -> tuple:
             return False, "No se encontró ROOT_FOLDER_ID en los Secrets."
 
         fecha_prod = st.session_state.fecha_produccion
-        turno = st.session_state.turno
 
         spreadsheet_id = get_or_create_month_spreadsheet_id(drive, root_folder_id, fecha_prod)
         spreadsheet = gc.open_by_key(spreadsheet_id)
-        ws = get_or_create_daily_worksheet(spreadsheet, fecha_prod, turno)
+        ws = get_or_create_daily_worksheet(spreadsheet, fecha_prod)
 
         fila_footer = _encontrar_fila_footer(ws)
         if fila_footer is None:
@@ -341,7 +339,7 @@ def guardar_en_google_sheets(filas: list) -> tuple:
 
         return True, (
             f"Guardado en '{nombre_mes_es(fecha_prod)}' → hoja "
-            f"'{fecha_prod.strftime('%Y-%m-%d')} {turno}'."
+            f"'{fecha_prod.strftime('%Y-%m-%d')}'."
         )
     except Exception as e:
         return False, f"Error al guardar en Google Sheets: {e}"
@@ -413,13 +411,6 @@ elif st.session_state.step == 2:
         if st.session_state.get("responsable") in EQUIPO_CALIDAD else 0,
     )
 
-    turno = st.selectbox(
-        "Turno",
-        TURNOS,
-        index=TURNOS.index(st.session_state.get("turno", TURNOS[0]))
-        if st.session_state.get("turno") in TURNOS else 0,
-    )
-
     fecha_produccion = st.date_input(
         "Fecha de producción (= fecha de registro)",
         value=st.session_state.get("fecha_produccion", None),
@@ -436,7 +427,6 @@ elif st.session_state.step == 2:
     with col2:
         if st.button("Siguiente ➜", type="primary", disabled=fecha_produccion is None):
             st.session_state.responsable = responsable
-            st.session_state.turno = turno
             st.session_state.fecha_produccion = fecha_produccion
             go_next()
             st.rerun()
@@ -708,14 +698,14 @@ elif st.session_state.step == 9:
     resumen_info = pd.DataFrame(
         {
             "Campo": [
-                "Equipo de calidad", "Turno", "Fecha de producción", "Cliente", "Área",
+                "Equipo de calidad", "Fecha de producción", "Cliente", "Área",
                 "Línea HACCP", "Producto", "Temperatura de almacenamiento",
                 "Temperatura de liberación", "Vida útil (días)", "Fecha de vencimiento",
                 "Lote (Juliano)", "Tamaño de batch", "Letra código muestreo",
                 "N° de muestras", "Conclusión",
             ],
             "Valor": [
-                st.session_state.responsable, st.session_state.turno,
+                st.session_state.responsable,
                 st.session_state.fecha_produccion.strftime("%d/%m/%Y"),
                 CLIENTE_FIJO, AREA_FIJA,
                 st.session_state.linea_haccp, st.session_state.producto,
@@ -749,7 +739,8 @@ elif st.session_state.step == 9:
     }
 
     def valor_muestra(clave, i):
-        return valores_por_parametro.get(clave, [""] * n)[i]
+        valor = valores_por_parametro.get(clave, [None] * n)[i]
+        return valor if valor not in (None, "") else "No aplica"
 
     filas_export = []
     for i in range(n):
@@ -765,9 +756,9 @@ elif st.session_state.step == 9:
             st.session_state.fecha_vencimiento.strftime("%d/%m/%Y"),
             st.session_state.temp_liberacion,
             valor_muestra("peso", i),
-            valor_muestra("diametro", i) if "diametro" in valores_por_parametro else "",
-            "",  # Largo (va combinado en "largo_ancho", se deja vacío salvo que se separe)
-            "",  # Ancho
+            valor_muestra("diametro", i) if "diametro" in valores_por_parametro else "No aplica",
+            "No aplica",  # Largo (se completa abajo si el producto usa largo x ancho)
+            "No aplica",  # Ancho (no se usa: la pregunta es combinada, va toda en "Largo")
             valor_muestra("altura", i),
             valor_muestra("sabor_olor_color", i),
             valor_muestra("textura", i),
@@ -778,8 +769,9 @@ elif st.session_state.step == 9:
             iniciales(st.session_state.responsable),
         ]
         # Si el producto usa largo x ancho en vez de diámetro, lo ponemos en la columna Largo
+        # (antes se escribía por error en la columna Ancho, índice 13 en vez de 12)
         if "largo_ancho" in valores_por_parametro:
-            fila[13] = valor_muestra("largo_ancho", i)
+            fila[12] = valor_muestra("largo_ancho", i)
         filas_export.append(fila)
 
     export_df = pd.DataFrame(filas_export, columns=HEADERS_EXPORT)
