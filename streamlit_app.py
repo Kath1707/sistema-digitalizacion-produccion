@@ -740,7 +740,13 @@ elif st.session_state.step == 9:
 
     def valor_muestra(clave, i):
         valor = valores_por_parametro.get(clave, [None] * n)[i]
-        return valor if valor not in (None, "") else "No aplica"
+        if valor in (None, ""):
+            return "No aplica"
+        if valor == "No conforme":
+            comentario = st.session_state.comentarios_parametro.get(clave, "").strip()
+            if comentario:
+                return f"No conforme: {comentario}"
+        return valor
 
     filas_export = []
     for i in range(n):
