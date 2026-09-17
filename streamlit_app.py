@@ -49,7 +49,7 @@ st.set_page_config(
     layout="wide",
 )
 
-EXCEL_PATH = "MA_BASE_DATOS_PRODUCTOS_TERMINADO.xlsx"
+EXCEL_PATH = "data/MA_BASE_DATOS_PRODUCTOS_TERMINADO.xlsx"
 SHEET_NAME = "ALMENARA-PT_2026"
 CLIENTE_FIJO = "STARBUCKS"
 AREA_FIJA = "EMPAQUE"
@@ -314,6 +314,85 @@ def get_or_create_daily_worksheet(spreadsheet, fecha_produccion: date):
     return ws
 
 
+def _ajustar_filas_al_encabezado_real(ws, filas: list) -> list:
+    """Alinea las filas a las columnas reales de la hoja, por si la plantilla física
+    difiere de HEADERS_EXPORT (ej. todavía trae la columna 'Grados Brix' que ya no
+    generamos). Si encuentra una columna de encabezado que no producimos, inserta
+    un valor vacío ahí para que el resto no se corra."""
+    try:
+        headers_reales = ws.row_values(FILA_ENCABEZADO_PLANTILLA)
+    except Exception:
+        return filas  # si no se puede leer el encabezado, no tocamos nada
+
+    columnas_extra_conocidas = ["BRIX"]  # nombres (o parte de ellos) que ya no generamos
+    posiciones_a_insertar = [
+        idx for idx, h in enumerate(headers_reales)
+        if any(marca in h.upper() for marca in columnas_extra_conocidas)
+    ]
+    if not posiciones_a_insertar:
+        return filas
+
+    filas_ajustadas = []
+    for fila in filas:
+        fila_nueva = list(fila)
+        for pos in sorted(posiciones_a_insertar):
+            fila_nueva.insert(pos, "")
+        filas_ajustadas.append(fila_nueva)
+    return filas_ajustadas
+
+
+def obtener_productos_registrados_hoy(fecha: date) -> set:
+    """Lee (sin crear nada) qué productos ya tienen registro en la hoja del día.
+    Si el archivo del mes o la hoja del día todavía no existen, devuelve un
+    conjunto vacío (nadie ha registrado nada todavía)."""
+    gc, drive = get_gsheet_client_and_drive()
+    if gc is None or drive is None:
+        return set()
+    try:
+        root_folder_id = st.secrets.get("ROOT_FOLDER_ID")
+        if not root_folder_id:
+            return set()
+
+        subcarpeta_id = _buscar_archivo_en_carpeta(drive, SUBCARPETA_DRIVE, root_folder_id, es_carpeta=True)
+        if subcarpeta_id is None:
+            return set()
+
+        nombre_mes = nombre_mes_es(fecha)
+        archivo_mes_id = _buscar_archivo_en_carpeta(drive, nombre_mes, subcarpeta_id)
+        if archivo_mes_id is None:
+            return set()  # aún no existe el archivo del mes -> nadie ha registrado nada
+
+        spreadsheet = gc.open_by_key(archivo_mes_id)
+        titulo_hoja = fecha.strftime("%Y-%m-%d")
+        try:
+            ws = spreadsheet.worksheet(titulo_hoja)
+        except gspread.exceptions.WorksheetNotFound:
+            return set()  # aún no existe la hoja del día -> nadie ha registrado nada
+
+        valores = ws.get_all_values()
+        if len(valores) < FILA_ENCABEZADO_PLANTILLA:
+            return set()
+
+        encabezado = valores[FILA_ENCABEZADO_PLANTILLA - 1]
+        col_producto = None
+        for idx, h in enumerate(encabezado):
+            if h.strip().upper() == "PRODUCTO":
+                col_producto = idx
+                break
+        if col_producto is None:
+            return set()
+
+        productos = set()
+        for fila in valores[FILA_ENCABEZADO_PLANTILLA:]:
+            if fila and fila[0].strip().upper().startswith(FOOTER_MARCA):
+                break
+            if len(fila) > col_producto and fila[col_producto].strip():
+                productos.add(fila[col_producto].strip().upper())
+        return productos
+    except Exception:
+        return set()  # ante cualquier error de lectura, no bloqueamos el flujo
+
+
 def guardar_en_google_sheets(filas: list) -> tuple:
     """Guarda las filas en la hoja del día correspondiente, dentro del Sheets del mes."""
     gc, drive = get_gsheet_client_and_drive()
@@ -329,6 +408,8 @@ def guardar_en_google_sheets(filas: list) -> tuple:
         spreadsheet_id = get_or_create_month_spreadsheet_id(drive, root_folder_id, fecha_prod)
         spreadsheet = gc.open_by_key(spreadsheet_id)
         ws = get_or_create_daily_worksheet(spreadsheet, fecha_prod)
+
+        filas = _ajustar_filas_al_encabezado_real(ws, filas)
 
         fila_footer = _encontrar_fila_footer(ws)
         if fila_footer is None:
@@ -437,12 +518,36 @@ elif st.session_state.step == 2:
 elif st.session_state.step == 3:
     st.header("2️⃣ Línea HACCP y producto")
 
+    if "productos_registrados_hoy" not in st.session_state:
+        with st.spinner("Revisando qué productos ya se registraron hoy..."):
+            st.session_state.productos_registrados_hoy = obtener_productos_registrados_hoy(
+                st.session_state.fecha_produccion
+            )
+    productos_hoy = st.session_state.productos_registrados_hoy
+
+    if productos_hoy:
+        st.warning(
+            "⚠️ Ya hay registro hoy (" + st.session_state.fecha_produccion.strftime("%d/%m/%Y") +
+            ") para: " + ", ".join(sorted(productos_hoy)) +
+            ". No aparecen en la lista de abajo para evitar duplicados."
+        )
+
     lineas = sorted(specs_df["linea_haccp"].dropna().unique().tolist())
     linea_sel = st.selectbox("Línea de producción HACCP", lineas)
 
     productos_linea = sorted(
-        specs_df.loc[specs_df["linea_haccp"] == linea_sel, "producto"].unique().tolist()
+        p for p in specs_df.loc[specs_df["linea_haccp"] == linea_sel, "producto"].unique().tolist()
+        if p.strip().upper() not in productos_hoy
     )
+
+    if not productos_linea:
+        st.error(
+            "Todos los productos de esta línea ya fueron registrados hoy. "
+            "Elige otra línea, o revisa con el equipo si de verdad falta uno."
+        )
+        st.button("⬅ Atrás", on_click=go_back)
+        st.stop()
+
     producto_sel = st.selectbox("Producto", productos_linea)
 
     filas_prod = specs_df[specs_df["producto"] == producto_sel]
@@ -792,11 +897,22 @@ elif st.session_state.step == 9:
     st.subheader("Guardar historial")
 
     if st.button("💾 Guardar en Google Sheets (historial)", type="primary"):
-        exito, mensaje = guardar_en_google_sheets(filas_export)
-        if exito:
-            st.success(mensaje)
+        producto_actual = st.session_state.producto.strip().upper()
+        productos_hoy_actual = obtener_productos_registrados_hoy(st.session_state.fecha_produccion)
+        if producto_actual in productos_hoy_actual:
+            st.error(
+                f"⚠️ No se guardó: **{st.session_state.producto}** ya tiene un registro hoy "
+                f"({st.session_state.fecha_produccion.strftime('%d/%m/%Y')}), probablemente hecho "
+                "por otro supervisor mientras completabas este formulario. Puedes descargar este "
+                "registro como respaldo (CSV/Excel abajo), pero no se duplicará en el historial."
+            )
         else:
-            st.error(mensaje)
+            exito, mensaje = guardar_en_google_sheets(filas_export)
+            if exito:
+                st.success(mensaje)
+                st.session_state.productos_registrados_hoy = productos_hoy_actual | {producto_actual}
+            else:
+                st.error(mensaje)
 
     # ------------------------------------------------------------------
     # Exportación local
