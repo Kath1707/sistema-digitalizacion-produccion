@@ -96,6 +96,63 @@ INOCUIDAD_PT = [
      "¿El producto empacado se destina a la T° de almacenamiento indicada en el plan ({temp_almac})?"),
 ]
 
+# ----------------------------------------------------------------------------
+# EQUIPOS DE MEDICIÓN (solo BALANZAS y TERMÓMETROS usados en la inspección de PT)
+# (codigo, nombre, ubicación). Se muestran en el paso 6 y se guarda el CÓDIGO.
+# Para las balanzas que no tienen código de inventario se usa la etiqueta del equipo
+# (ej. "CLD-02"). Fuera de esta lista quedan a propósito: balanzas de dosimetría,
+# cocina y almacén, y otros equipos (luxómetro, termohigrómetro, datalogger, pesas patrón).
+# Para agregar/quitar un equipo basta editar estas listas.
+# ----------------------------------------------------------------------------
+BALANZAS_PT = [
+    ("SFBA-001", "BALANZA BA-001 OHAUS", "SALA DE FORMADO"),
+    ("SFBA-002", "BALANZA PR-02 OHAUS", "SALA DE FORMADO"),
+    ("SFBA-003", "BALANZA PR-03 SUPER-SS", "SALA DE FORMADO"),
+    ("SFBA-005", "BALANZA PR-05 JADEVER", "SALA DE FORMADO"),
+    ("SDBA-001", "BALANZA RE-01 SUPER-SS", "SALA DE DECORADO"),
+    ("SDBA-002", "BALANZA RE-02 (SC) SUPER-SS", "SALA DE DECORADO"),
+    ("SDBA-003", "BALANZA RE-03 SUPER-SS", "SALA DE DECORADO"),
+    ("SDBA-004", "BALANZA RE-06 OHAUS", "SALA DE DECORADO"),
+    ("SDBA-005", "BALANZA RE-08 JADEVER", "MUFFIN"),
+    ("SDBA-006", "BALANZA RE-09 SUPER-SS", "SALA DE DECORADO"),
+    ("SDBA-007", "BALANZA RE-10 SUPER-SS", "SALA DE DECORADO"),
+    ("SDBA-008", "BALANZA RE-11 SUPER-SS", "PROCESOS"),
+    ("SDBA-009", "BALANZA RE-12 JADEVER", "SALA DE DECORADO"),
+    ("SDBA-010", "BALANZA RE-13 SUPER-SS", "SALA DE DECORADO"),
+    ("CLD-01", "BALANZA CLD-01 TRUPER", "CALIDAD"),
+    ("CLD-02", "BALANZA CLD-02 TRUPER", "CALIDAD"),
+    ("CA-02", "BALANZA CA-02 PRECISA", "PRODUCCION"),
+    ("RE-05", "BALANZA RE-05 JADEVER", "GALLETON"),
+    ("PRO-13", "BALANZA PRO-13 SUPER-SS", "CHEESE CAKE"),
+    ("PRO-14", "BALANZA PRO-14 SUPER-SS", "PROCESOS"),
+    ("PRO-11", "BALANZA PRO-11 SUPER-SS", "PROCESOS"),
+    ("DEC-01", "BALANZA DEC-01 SUPER-SS", "PROCESOS"),
+    ("RE04", "BALANZA RE04", "PROCESOS"),
+    ("PRO15", "BALANZA PRO15", "PROCESOS"),
+    ("PRO03", "BALANZA PRO03", "PROCESOS"),
+    ("EMP 01", "BALANZA EMP 01", "PROCESOS"),
+    ("REL-02", "BALANZA REL-02", "PROCESOS"),
+    ("PRO10", "BALANZA PRO10", "PROCESOS"),
+]
+
+TERMOMETROS_PT = [
+    ("TER-003", "TERMÓMETRO INFRARROJO TER-003", "CALIDAD"),
+    ("TER-004", "TERMÓMETRO INFRARROJO TER-004", "CALIDAD"),
+    ("TER-005", "TERMÓMETRO INFRARROJO TER-005", "CALIDAD"),
+    ("TER-006", "TERMÓMETRO INFRARROJO TER-006", "ALMACEN"),
+    ("M1 CAL", "TERMÓMETRO DIGITAL M1 CAL", "CALIDAD"),
+    ("M3CAL", "TERMÓMETRO DIGITAL M3CAL", "CALIDAD"),
+    ("M4CAL", "TERMÓMETRO DIGITAL M4CAL", "CALIDAD"),
+    ("PT O1", "TERMÓMETRO DIGITAL PT O1 (patrón)", "CALIDAD - PATRÓN"),
+]
+
+
+def etiqueta_equipo(eq) -> str:
+    """Texto que ve el usuario en la lista: CÓDIGO · NOMBRE · UBICACIÓN."""
+    codigo, nombre, ubicacion = eq
+    return f"{codigo}  ·  {nombre}  ·  {ubicacion}"
+
+
 # Encabezados finales del historial / exportable (mismo orden que la plantilla FR_Liberacion
 # editada — SIN "Grados Brix", que se eliminó de la plantilla porque ningún producto lo usa)
 HEADERS_EXPORT = [
@@ -109,6 +166,8 @@ HEADERS_EXPORT = [
     "Higiene Equipos y Área (C/NC)",
     f"T° Liberación ≤{TEMP_LIBERACION_MAX}°C (C/NC)",
     "T° Almacenamiento (C/NC)",
+    # --- EQUIPOS DE MEDICIÓN usados en el registro ---
+    "Código de Balanza", "Código de Termómetro",
     "Conclusión (C/NC)", "Iniciales",
 ]
 
@@ -615,7 +674,7 @@ elif st.session_state.step == 4:
     temp_almac_sel = st.selectbox("Temperatura de almacenamiento", opciones_temp)
 
     st.caption("La T° de liberación (≤23 °C al empaque) y los demás controles de inocuidad "
-               "se registran más adelante, en el paso 7.")
+               "se registran más adelante, en el paso 8.")
 
     fila_temp = filas_prod[filas_prod["temp_almacenamiento"] == temp_almac_sel].iloc[0]
     vida_util_dias = int(fila_temp["vida_util"])
@@ -699,10 +758,54 @@ elif st.session_state.step == 6:
             st.rerun()
 
 # ============================================================================
-# PASO 7 - REGISTRO DE PARÁMETROS POR MUESTRA
+# PASO 7 - EQUIPOS DE MEDICIÓN (balanza y termómetro utilizados)
 # ============================================================================
 elif st.session_state.step == 7:
-    st.header("6️⃣ Registro de parámetros por muestra")
+    st.header("6️⃣ Equipos de medición utilizados")
+    st.caption("Selecciona la **balanza** (peso) y el **termómetro** (temperatura) que usaste "
+               "en esta inspección. Se guardará el código de cada equipo en el historial.")
+
+    # --- Balanza (con filtro opcional por ubicación para no recorrer toda la lista) ---
+    ubicaciones = sorted({u for _, _, u in BALANZAS_PT})
+    filtro_ub = st.selectbox("Filtrar balanzas por ubicación (opcional)", ["Todas"] + ubicaciones)
+    balanzas_op = [b for b in BALANZAS_PT if filtro_ub == "Todas" or b[2] == filtro_ub]
+
+    bal_previa = st.session_state.get("balanza_sel")
+    idx_bal = next((i for i, b in enumerate(balanzas_op) if b[0] == bal_previa), None)
+    bal_sel = st.selectbox(
+        "Balanza utilizada", balanzas_op, index=idx_bal,
+        format_func=etiqueta_equipo, placeholder="Selecciona la balanza...",
+        key=f"widget_balanza_{filtro_ub}",
+    )
+
+    # --- Termómetro ---
+    ter_previo = st.session_state.get("termometro_sel")
+    idx_ter = next((i for i, t in enumerate(TERMOMETROS_PT) if t[0] == ter_previo), None)
+    ter_sel = st.selectbox(
+        "Termómetro utilizado", TERMOMETROS_PT, index=idx_ter,
+        format_func=etiqueta_equipo, placeholder="Selecciona el termómetro...",
+        key="widget_termometro",
+    )
+
+    listo = bal_sel is not None and ter_sel is not None
+    if not listo:
+        st.caption("⚠️ Debes seleccionar la balanza y el termómetro para continuar.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary", disabled=not listo):
+            st.session_state.balanza_sel = bal_sel[0]
+            st.session_state.termometro_sel = ter_sel[0]
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 8 - REGISTRO DE PARÁMETROS POR MUESTRA
+# ============================================================================
+elif st.session_state.step == 8:
+    st.header("7️⃣ Registro de parámetros por muestra")
 
     fila_spec = st.session_state.fila_spec
     n = st.session_state.n_muestras
@@ -789,10 +892,10 @@ elif st.session_state.step == 7:
             st.rerun()
 
 # ============================================================================
-# PASO 8 - CONTROL DE INOCUIDAD (MA-PL-019) - a nivel de lote
+# PASO 9 - CONTROL DE INOCUIDAD (MA-PL-019) - a nivel de lote
 # ============================================================================
-elif st.session_state.step == 8:
-    st.header("7️⃣ Control de inocuidad")
+elif st.session_state.step == 9:
+    st.header("8️⃣ Control de inocuidad")
     st.caption("Estos controles se responden **una sola vez por lote** (aplican a todas las muestras). "
                "Si marcas 'No conforme' se habilitará el cuadro de acción correctiva.")
 
@@ -806,6 +909,8 @@ elif st.session_state.step == 8:
     for (clave, tab_label, _, pregunta), tab in zip(INOCUIDAD_PT, tabs_in):
         with tab:
             st.markdown(f"**{pregunta.format(temp_almac=temp_almac)}**")
+            if clave == "t_liberacion":
+                st.caption(f"🌡️ Termómetro registrado: **{st.session_state.get('termometro_sel', '-')}**")
             actual = st.session_state.respuestas_inocuidad.get(clave, "Conforme")
             st.session_state.respuestas_inocuidad[clave] = st.radio(
                 tab_label, ["Conforme", "No conforme"],
@@ -830,10 +935,10 @@ elif st.session_state.step == 8:
             st.rerun()
 
 # ============================================================================
-# PASO 9 - CONCLUSIÓN DEL REGISTRO (liberación del batch)
+# PASO 10 - CONCLUSIÓN DEL REGISTRO (liberación del batch)
 # ============================================================================
-elif st.session_state.step == 9:
-    st.header("8️⃣ Conclusión del registro")
+elif st.session_state.step == 10:
+    st.header("9️⃣ Conclusión del registro")
 
     nc_inocuidad = [t for c, t, _, _ in INOCUIDAD_PT
                     if st.session_state.respuestas_inocuidad.get(c) == "No conforme"]
@@ -859,10 +964,10 @@ elif st.session_state.step == 9:
             st.rerun()
 
 # ============================================================================
-# PASO 10 - RESUMEN FINAL, GUARDADO EN GOOGLE SHEETS Y EXPORTACIÓN
+# PASO 11 - RESUMEN FINAL, GUARDADO EN GOOGLE SHEETS Y EXPORTACIÓN
 # ============================================================================
-elif st.session_state.step == 10:
-    st.header("9️⃣ Resumen final")
+elif st.session_state.step == 11:
+    st.header("🔟 Resumen final")
 
     fila_spec = st.session_state.fila_spec
     n = st.session_state.n_muestras
@@ -876,7 +981,7 @@ elif st.session_state.step == 10:
                 "Línea HACCP", "Producto", "Temperatura de almacenamiento",
                 "Vida útil (días)", "Fecha de vencimiento",
                 "Lote (Juliano)", "Tamaño de batch", "Letra código muestreo",
-                "N° de muestras", "Conclusión",
+                "N° de muestras", "Balanza utilizada", "Termómetro utilizado", "Conclusión",
             ],
             "Valor": [
                 st.session_state.responsable,
@@ -888,6 +993,7 @@ elif st.session_state.step == 10:
                 st.session_state.fecha_vencimiento.strftime("%d/%m/%Y"),
                 st.session_state.lote_juliano, st.session_state.batch_size,
                 st.session_state.letra_codigo, n,
+                st.session_state.balanza_sel, st.session_state.termometro_sel,
                 st.session_state.conclusion,
             ],
         }
@@ -966,6 +1072,8 @@ elif st.session_state.step == 10:
             valor_inocuidad("higiene"),
             valor_inocuidad("t_liberacion"),
             valor_inocuidad("t_almacenamiento"),
+            st.session_state.balanza_sel,      # Código de Balanza
+            st.session_state.termometro_sel,   # Código de Termómetro
             st.session_state.conclusion,
             iniciales(st.session_state.responsable),
         ]
