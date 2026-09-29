@@ -1,5 +1,5 @@
 """
-App de Registro de Parámetros de Calidad - Producto Terminado B2B Starbucks (v2)
+App de Registro de Parámetros de Calidad - Producto Terminado B2B Starbucks (v3 - inocuidad MA-PL-019)
 ==================================================================================
 Streamlit + Google Sheets (histórico) + GitHub deploy.
 
@@ -76,17 +76,39 @@ def nombre_mes_es(fecha: date) -> str:
     return f"{MESES_ES[fecha.month]} {fecha.year}{SUFIJO_MES}"
 
 
-TEMP_LIBERACION_OPCIONES = ["0 a 4 °C", "<23 °C", "menor a -16°C"]
+# ----------------------------------------------------------------------------
+# CONTROL DE INOCUIDAD - Plan de Calidad MA-PL-019 (hoja ALMENARA-PT_2026)
+# Son controles a nivel de LOTE (una sola respuesta por registro, que se repite en
+# cada fila/muestra del historial). Orden idéntico al del plan:
+#   Verificación higiene -> T° liberación -> T° almacenamiento
+# Frecuencia (plan): "cada que se produzca". Responsable: Supervisor.
+# ----------------------------------------------------------------------------
+TEMP_LIBERACION_MAX = 23  # °C, plan: "T°: ≤23°C" (medida al momento del EMPAQUE)
+
+INOCUIDAD_PT = [
+    # (clave, pestaña, encabezado, pregunta)
+    ("higiene", "Higiene de equipos y área", "Higiene Equipos y Área (C/NC)",
+     "¿La verificación de higiene de equipos y área de empaque es conforme "
+     "(equipos, mesa y área limpios y desinfectados antes de iniciar el empaque)?"),
+    ("t_liberacion", "T° de liberación", f"T° Liberación ≤{TEMP_LIBERACION_MAX}°C (C/NC)",
+     f"¿La temperatura del producto al momento del empaque (liberación) es ≤ {TEMP_LIBERACION_MAX} °C?"),
+    ("t_almacenamiento", "T° de almacenamiento", "T° Almacenamiento (C/NC)",
+     "¿El producto empacado se destina a la T° de almacenamiento indicada en el plan ({temp_almac})?"),
+]
 
 # Encabezados finales del historial / exportable (mismo orden que la plantilla FR_Liberacion
 # editada — SIN "Grados Brix", que se eliminó de la plantilla porque ningún producto lo usa)
 HEADERS_EXPORT = [
     "FECHA", "AREA", "CLIENTE", "N° de Muestra", "Producto", "Línea HACCP",
     "Lote (Juliano)", "Fecha Producción", "Fecha Vencimiento",
-    "T° Liberación",
+    "T° Almacenamiento (plan)",
     "Peso (g)", "Diámetro (cm)", "Largo (cm)", "Ancho (cm)", "Altura (cm)",
     "Sabor/Olor/Color", "Textura", "Apariencia",
     "Integridad del Empaque (C/NC)", "Rotulado (C/NC)",
+    # --- CONTROL INOCUIDAD (MA-PL-019), mismo orden que el plan ---
+    "Higiene Equipos y Área (C/NC)",
+    f"T° Liberación ≤{TEMP_LIBERACION_MAX}°C (C/NC)",
+    "T° Almacenamiento (C/NC)",
     "Conclusión (C/NC)", "Iniciales",
 ]
 
@@ -584,7 +606,7 @@ elif st.session_state.step == 3:
 # PASO 4 - TEMPERATURAS (ALMACENAMIENTO Y LIBERACIÓN) Y VIDA ÚTIL
 # ============================================================================
 elif st.session_state.step == 4:
-    st.header("3️⃣ Temperaturas")
+    st.header("3️⃣ Temperatura de almacenamiento y vida útil")
 
     producto_sel = st.session_state.producto
     filas_prod = specs_df[specs_df["producto"] == producto_sel]
@@ -592,7 +614,8 @@ elif st.session_state.step == 4:
     opciones_temp = filas_prod["temp_almacenamiento"].dropna().unique().tolist()
     temp_almac_sel = st.selectbox("Temperatura de almacenamiento", opciones_temp)
 
-    temp_liberacion_sel = st.selectbox("Temperatura de liberación", TEMP_LIBERACION_OPCIONES)
+    st.caption("La T° de liberación (≤23 °C al empaque) y los demás controles de inocuidad "
+               "se registran más adelante, en el paso 7.")
 
     fila_temp = filas_prod[filas_prod["temp_almacenamiento"] == temp_almac_sel].iloc[0]
     vida_util_dias = int(fila_temp["vida_util"])
@@ -609,7 +632,6 @@ elif st.session_state.step == 4:
     with colB:
         if st.button("Siguiente ➜", type="primary"):
             st.session_state.temp_almacenamiento = temp_almac_sel
-            st.session_state.temp_liberacion = temp_liberacion_sel
             st.session_state.vida_util = vida_util_dias
             st.session_state.fecha_vencimiento = fecha_venc
             st.session_state.fila_spec = fila_temp.to_dict()
@@ -767,10 +789,57 @@ elif st.session_state.step == 7:
             st.rerun()
 
 # ============================================================================
-# PASO 8 - CONCLUSIÓN DEL REGISTRO (liberación del batch)
+# PASO 8 - CONTROL DE INOCUIDAD (MA-PL-019) - a nivel de lote
 # ============================================================================
 elif st.session_state.step == 8:
-    st.header("7️⃣ Conclusión del registro")
+    st.header("7️⃣ Control de inocuidad")
+    st.caption("Estos controles se responden **una sola vez por lote** (aplican a todas las muestras). "
+               "Si marcas 'No conforme' se habilitará el cuadro de acción correctiva.")
+
+    if "respuestas_inocuidad" not in st.session_state:
+        st.session_state.respuestas_inocuidad = {}
+    if "comentarios_inocuidad" not in st.session_state:
+        st.session_state.comentarios_inocuidad = {}
+
+    temp_almac = st.session_state.temp_almacenamiento
+    tabs_in = st.tabs([f"🛡️ {tab}" for _, tab, _, _ in INOCUIDAD_PT])
+    for (clave, tab_label, _, pregunta), tab in zip(INOCUIDAD_PT, tabs_in):
+        with tab:
+            st.markdown(f"**{pregunta.format(temp_almac=temp_almac)}**")
+            actual = st.session_state.respuestas_inocuidad.get(clave, "Conforme")
+            st.session_state.respuestas_inocuidad[clave] = st.radio(
+                tab_label, ["Conforme", "No conforme"],
+                index=0 if actual == "Conforme" else 1,
+                horizontal=True, key=f"widget_inocu_{clave}",
+            )
+            if st.session_state.respuestas_inocuidad[clave] == "No conforme":
+                st.session_state.comentarios_inocuidad[clave] = st.text_area(
+                    f"Acción correctiva / comentario para '{tab_label}'",
+                    value=st.session_state.comentarios_inocuidad.get(clave, ""),
+                    key=f"comentario_inocu_{clave}",
+                )
+            else:
+                st.session_state.comentarios_inocuidad[clave] = ""
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.button("⬅ Atrás", on_click=go_back)
+    with col2:
+        if st.button("Siguiente ➜", type="primary"):
+            go_next()
+            st.rerun()
+
+# ============================================================================
+# PASO 9 - CONCLUSIÓN DEL REGISTRO (liberación del batch)
+# ============================================================================
+elif st.session_state.step == 9:
+    st.header("8️⃣ Conclusión del registro")
+
+    nc_inocuidad = [t for c, t, _, _ in INOCUIDAD_PT
+                    if st.session_state.respuestas_inocuidad.get(c) == "No conforme"]
+    if nc_inocuidad:
+        st.warning("⚠️ Hay controles de inocuidad **No conforme**: " + ", ".join(nc_inocuidad)
+                   + ". Considera esto antes de liberar el batch.")
 
     st.markdown("Con base en todo lo evaluado, indica si el batch se libera o no.")
     conclusion = st.radio(
@@ -790,10 +859,10 @@ elif st.session_state.step == 8:
             st.rerun()
 
 # ============================================================================
-# PASO 9 - RESUMEN FINAL, GUARDADO EN GOOGLE SHEETS Y EXPORTACIÓN
+# PASO 10 - RESUMEN FINAL, GUARDADO EN GOOGLE SHEETS Y EXPORTACIÓN
 # ============================================================================
-elif st.session_state.step == 9:
-    st.header("8️⃣ Resumen final")
+elif st.session_state.step == 10:
+    st.header("9️⃣ Resumen final")
 
     fila_spec = st.session_state.fila_spec
     n = st.session_state.n_muestras
@@ -805,7 +874,7 @@ elif st.session_state.step == 9:
             "Campo": [
                 "Equipo de calidad", "Fecha de producción", "Cliente", "Área",
                 "Línea HACCP", "Producto", "Temperatura de almacenamiento",
-                "Temperatura de liberación", "Vida útil (días)", "Fecha de vencimiento",
+                "Vida útil (días)", "Fecha de vencimiento",
                 "Lote (Juliano)", "Tamaño de batch", "Letra código muestreo",
                 "N° de muestras", "Conclusión",
             ],
@@ -814,7 +883,7 @@ elif st.session_state.step == 9:
                 st.session_state.fecha_produccion.strftime("%d/%m/%Y"),
                 CLIENTE_FIJO, AREA_FIJA,
                 st.session_state.linea_haccp, st.session_state.producto,
-                st.session_state.temp_almacenamiento, st.session_state.temp_liberacion,
+                st.session_state.temp_almacenamiento,
                 st.session_state.vida_util,
                 st.session_state.fecha_vencimiento.strftime("%d/%m/%Y"),
                 st.session_state.lote_juliano, st.session_state.batch_size,
@@ -835,6 +904,16 @@ elif st.session_state.step == 9:
         }
     st.dataframe(pd.DataFrame(conteo).T, use_container_width=True)
 
+    st.subheader("Control de inocuidad (lote)")
+    st.dataframe(
+        pd.DataFrame({
+            "Control": [t for _, t, _, _ in INOCUIDAD_PT],
+            "Resultado": [st.session_state.respuestas_inocuidad.get(c, "Conforme")
+                          for c, _, _, _ in INOCUIDAD_PT],
+        }),
+        use_container_width=True, hide_index=True,
+    )
+
     # ------------------------------------------------------------------
     # Armado de las filas exportables (una fila por muestra)
     # ------------------------------------------------------------------
@@ -853,6 +932,14 @@ elif st.session_state.step == 9:
                 return f"No conforme: {comentario}"
         return valor
 
+    def valor_inocuidad(clave):
+        valor = st.session_state.respuestas_inocuidad.get(clave, "Conforme")
+        if valor == "No conforme":
+            accion = st.session_state.comentarios_inocuidad.get(clave, "").strip()
+            if accion:
+                return f"No conforme: {accion}"
+        return valor
+
     filas_export = []
     for i in range(n):
         fila = [
@@ -865,7 +952,7 @@ elif st.session_state.step == 9:
             st.session_state.lote_juliano,
             st.session_state.fecha_produccion.strftime("%d/%m/%Y"),
             st.session_state.fecha_vencimiento.strftime("%d/%m/%Y"),
-            st.session_state.temp_liberacion,
+            st.session_state.temp_almacenamiento,  # T° Almacenamiento (plan)
             valor_muestra("peso", i),
             valor_muestra("diametro", i) if "diametro" in valores_por_parametro else "No aplica",
             "No aplica",  # Largo (se completa abajo si el producto usa largo x ancho)
@@ -876,6 +963,9 @@ elif st.session_state.step == 9:
             valor_muestra("apariencia", i),
             valor_muestra("empaque", i),
             valor_muestra("rotulado", i),
+            valor_inocuidad("higiene"),
+            valor_inocuidad("t_liberacion"),
+            valor_inocuidad("t_almacenamiento"),
             st.session_state.conclusion,
             iniciales(st.session_state.responsable),
         ]
