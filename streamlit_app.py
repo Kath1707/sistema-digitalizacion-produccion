@@ -216,7 +216,7 @@ def get_sample_size(lot_size: int):
 # CARGA Y LIMPIEZA DE DATOS DEL EXCEL
 # ----------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def load_specs(excel_bytes: bytes) -> pd.DataFrame:
+def load_specs(excel_bytes: bytes, _version: int = 2) -> pd.DataFrame:
     df_raw = pd.read_excel(
         io.BytesIO(excel_bytes),
         sheet_name=SHEET_NAME,
@@ -266,8 +266,8 @@ PRODUCTOS_EXTRA = [
     {
         "col_extra": None,
         "producto": "GALLETA DECORADA PUMPKIN",
-        "linea_produccion": "GALLETAS",
-        "linea_haccp": "GALLETAS",
+        "linea_produccion": "LINEA GALLETAS",
+        "linea_haccp": "LINEA GALLETAS",
         "tipo": "PT",
         "peso": "27 g (+/- 1g)",
         "diametro": "-",
@@ -292,8 +292,8 @@ PRODUCTOS_EXTRA = [
     {
         "col_extra": None,
         "producto": "GALLETA DECORADA PUMPKIN",
-        "linea_produccion": "GALLETAS",
-        "linea_haccp": "GALLETAS",
+        "linea_produccion": "LINEA GALLETAS",
+        "linea_haccp": "LINEA GALLETAS",
         "tipo": "PT",
         "peso": "27 g (+/- 1g)",
         "diametro": "-",
@@ -615,7 +615,7 @@ def go_back():
 
 
 excel_bytes = get_excel_bytes()
-specs_df = _inyectar_productos_hardcoded(load_specs(excel_bytes))
+specs_df = _inyectar_productos_hardcoded(load_specs(excel_bytes, _version=2))
 
 # ============================================================================
 # PASO 1 - PORTADA
