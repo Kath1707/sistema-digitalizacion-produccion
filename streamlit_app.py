@@ -281,7 +281,7 @@ PRODUCTOS_EXTRA = [
             "Textura: crocante y suave"
         ),
         "temp_almacenamiento": "T° Ambiente (lugar fresco, seco y libre de olores fuertes)",
-        "vida_util": 30,
+        "vida_util": 5,
         "envase_tipo": "Envase primario",
         "presentacion": "Bolsa",
         "unidades_empaque": "1 unidad/bolsa",
@@ -307,7 +307,7 @@ PRODUCTOS_EXTRA = [
             "Textura: crocante y suave"
         ),
         "temp_almacenamiento": "T° Ambiente (lugar fresco, seco y libre de olores fuertes)",
-        "vida_util": 30,
+        "vida_util": 5,
         "envase_tipo": "Envase secundario",
         "presentacion": "Caja master tipo A",
         "unidades_empaque": "4 bolsas/caja",
