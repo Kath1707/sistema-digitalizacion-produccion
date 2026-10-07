@@ -257,6 +257,80 @@ def load_specs(excel_bytes: bytes) -> pd.DataFrame:
     return df_raw.reset_index(drop=True)
 
 
+# ----------------------------------------------------------------------------
+# PRODUCTOS HARDCODEADOS (no requieren editar el Excel de base de datos)
+# Añade aquí cualquier producto nuevo que no esté en MA_BASE_DATOS_PRODUCTOS_TERMINADO.xlsx
+# Columnas: misma estructura que load_specs() devuelve.
+# ----------------------------------------------------------------------------
+PRODUCTOS_EXTRA = [
+    {
+        "col_extra": None,
+        "producto": "GALLETA DECORADA PUMPKIN",
+        "linea_produccion": "GALLETAS",
+        "linea_haccp": "GALLETAS",
+        "tipo": "PT",
+        "peso": "27 g (+/- 1g)",
+        "diametro": "-",
+        "largo_ancho": "-",
+        "altura": "0.5 - 0.8 cm",
+        "organolepticas": (
+            "Apariencia: galleta en forma de calabaza\n"
+            "Sabor: a vainilla, dulce\n"
+            "Olor: a vainilla, dulce\n"
+            "Color: naranja con partes blancas y punto verde\n"
+            "Textura: crocante y suave"
+        ),
+        "temp_almacenamiento": "T° Ambiente (lugar fresco, seco y libre de olores fuertes)",
+        "vida_util": 30,
+        "envase_tipo": "Envase primario",
+        "presentacion": "Bolsa",
+        "unidades_empaque": "1 unidad/bolsa",
+        "material_empaque": "Polipropileno brillo",
+        "rotulado": "Sticker con rótulo descripción del producto",
+    },
+    # Segunda fila del mismo producto (envase secundario)
+    {
+        "col_extra": None,
+        "producto": "GALLETA DECORADA PUMPKIN",
+        "linea_produccion": "GALLETAS",
+        "linea_haccp": "GALLETAS",
+        "tipo": "PT",
+        "peso": "27 g (+/- 1g)",
+        "diametro": "-",
+        "largo_ancho": "-",
+        "altura": "0.5 - 0.8 cm",
+        "organolepticas": (
+            "Apariencia: galleta en forma de calabaza\n"
+            "Sabor: a vainilla, dulce\n"
+            "Olor: a vainilla, dulce\n"
+            "Color: naranja con partes blancas y punto verde\n"
+            "Textura: crocante y suave"
+        ),
+        "temp_almacenamiento": "T° Ambiente (lugar fresco, seco y libre de olores fuertes)",
+        "vida_util": 30,
+        "envase_tipo": "Envase secundario",
+        "presentacion": "Caja master tipo A",
+        "unidades_empaque": "4 bolsas/caja",
+        "material_empaque": "Cartón corrugado primer uso",
+        "rotulado": "Sticker con rótulo descripción del producto",
+    },
+]
+
+
+def _inyectar_productos_hardcoded(df: pd.DataFrame) -> pd.DataFrame:
+    """Añade PRODUCTOS_EXTRA al DataFrame de specs si aún no están presentes.
+    Útil para productos nuevos que no han sido cargados en el Excel base."""
+    nombres_existentes = set(df["producto"].str.upper().tolist())
+    filas_nuevas = [
+        p for p in PRODUCTOS_EXTRA
+        if p["producto"].upper() not in nombres_existentes
+    ]
+    if not filas_nuevas:
+        return df
+    df_extra = pd.DataFrame(filas_nuevas)
+    return pd.concat([df, df_extra], ignore_index=True)
+
+
 def campo_aplica(valor) -> bool:
     if valor is None or (isinstance(valor, float) and pd.isna(valor)):
         return False
@@ -495,7 +569,7 @@ def guardar_en_google_sheets(filas: list) -> tuple:
         fila_footer = _encontrar_fila_footer(ws)
         if fila_footer is None:
             # No se encontró el bloque de consideraciones: agregamos al final como respaldo
-            ws.append_rows(filas)
+            ws.append_rows(filas, table_range="A1")  # respaldo: siempre desde la columna A
         else:
             ws.insert_rows(filas, row=fila_footer)
 
@@ -541,7 +615,7 @@ def go_back():
 
 
 excel_bytes = get_excel_bytes()
-specs_df = load_specs(excel_bytes)
+specs_df = _inyectar_productos_hardcoded(load_specs(excel_bytes))
 
 # ============================================================================
 # PASO 1 - PORTADA
